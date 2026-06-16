@@ -43,3 +43,4 @@ test-*.js
 # Local agent instructions (not for upstream)
 AGENTS.md
 CLAUDE.md
+
