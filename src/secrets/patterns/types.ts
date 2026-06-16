@@ -16,7 +16,8 @@ export type SecretEntityType =
   | "HF_TOKEN"
   | "GITLAB_TOKEN"
   | "GOOGLE_API_KEY"
-  | "GENERIC_API_KEY";
+  | "GENERIC_API_KEY"
+  | "HIGH_ENTROPY_STRING";
 
 export interface SecretsMatch {
   type: SecretEntityType;

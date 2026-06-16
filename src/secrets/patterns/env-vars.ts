@@ -37,11 +37,11 @@ export const envVarsDetector: PatternDetector = {
       detectPattern(text, secretPattern, "ENV_SECRET", matches, locations);
     }
 
-    // Database connection strings with embedded passwords (user:password@host format)
-    // Supports: postgres, postgresql, mysql, mariadb, mongodb, mongodb+srv, redis, amqp, amqps
+    // Connection strings with embedded passwords (user:password@host format)
+    // Supports: postgres, mysql, mongodb, redis, amqp + generic transports (https, sftp, ssh, ftp, smtp)
     if (enabledTypes.has("CONNECTION_STRING")) {
       const connectionPattern =
-        /(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?):\/\/(?:[^:]*:[^@\s]+@)[^\s'"]+/gi;
+        /(?:(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?|https?|sftp|ssh|ftp|smtp):\/\/)[^:]+:[^@\s]+@[^\s'"]+/gi;
       detectPattern(text, connectionPattern, "CONNECTION_STRING", matches, locations);
     }
 

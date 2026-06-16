@@ -113,6 +113,7 @@ const SecretEntityTypes = [
   "GITLAB_TOKEN",
   "GOOGLE_API_KEY",
   "GENERIC_API_KEY",
+  "HIGH_ENTROPY_STRING",
 ] as const;
 
 const SecretsDetectionSchema = z.object({
