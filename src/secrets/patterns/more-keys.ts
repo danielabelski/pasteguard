@@ -47,9 +47,10 @@ export const moreKeysDetector: PatternDetector = {
     }
 
     // Generic API key assignment: api_key/access_token/client_secret = "value"
+    // Also matches "key is ...", "api key ...", "secret key = ..." etc.
     if (enabledTypes.has("GENERIC_API_KEY")) {
       const genericPattern =
-        /(?:api[_-]?key|api[_-]?secret|access[_-]?token|auth[_-]?token|client[_-]?secret|refresh[_-]?token)\s*[:=]\s*['"]?[a-zA-Z0-9_\-.]{16,}['"]?/gi;
+        /(?:(?:api[_-]?key|api[_-]?secret|access[_-]?token|auth[_-]?token|client[_-]?secret|refresh[_-]?token)\s*[:=]\s*|(?:(?<=^|[\s,;])(?:api|secret|auth|access)\s+key)\s+)\s*['"]?[a-zA-Z0-9_\-.]{16,}['"]?/gi;
       detectPattern(text, genericPattern, "GENERIC_API_KEY", matches, locations);
     }
 

@@ -24,9 +24,9 @@ export const envVarsDetector: PatternDetector = {
         /[A-Za-z_][A-Za-z0-9_]*(?:PASSWORD|_PWD)\s*[=:]\s*['"]?[^\s'"]{8,}['"]?/gi;
       detectPattern(text, pwEnvPattern, "ENV_PASSWORD", matches, locations);
 
-      // Inline password=... or password: ... or pwd=... assignments in free text
+      // Inline password=... or password: ... or pwd=... or password is ... assignments
       const pwInlinePattern =
-        /(?:(?<=^|[\s,;])password|passwd|pwd)\s*[=:]\s*['"]?[^\s'"]{8,}['"]?/gi;
+        /(?:(?<=^|[\s,;])(?:password|passwd|pwd))\s*(?:[:=]\s*|is\s+)['"]?[^\s'"]{8,}['"]?/gi;
       detectPattern(text, pwInlinePattern, "ENV_PASSWORD", matches, locations);
     }
 
