@@ -44,7 +44,7 @@ export async function callAnthropic(
   config: AnthropicProviderConfig,
   clientHeaders?: AnthropicClientHeaders,
 ): Promise<AnthropicResult> {
-  const isStreaming = request.stream ?? false;
+  const isStreaming = true;
   const baseUrl = (config.base_url || DEFAULT_ANTHROPIC_URL).replace(/\/$/, "");
 
   const headers: Record<string, string> = {
@@ -71,7 +71,7 @@ export async function callAnthropic(
   const response = await fetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers,
-    body: JSON.stringify(request),
+    body: JSON.stringify({ ...request, stream: true }),
     signal: timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined,
   });
 
