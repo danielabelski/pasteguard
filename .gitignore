@@ -39,3 +39,7 @@ coverage/
 test-*.ts
 test-*.sh
 test-*.js
+
+# Local agent instructions (not for upstream)
+AGENTS.md
+CLAUDE.md
