@@ -23,9 +23,9 @@ export const tokensDetector: PatternDetector = {
     }
 
     // Bearer tokens in Authorization-style contexts
-    // Matches "Bearer " followed by a token (at least 40 chars to reduce placeholder matches)
+    // Matches "Bearer " followed by a token (at least 20 chars)
     if (enabledTypes.has("BEARER_TOKEN")) {
-      const bearerPattern = /Bearer\s+[a-zA-Z0-9._-]{40,}/gi;
+      const bearerPattern = /Bearer\s+[a-zA-Z0-9._-]{20,}/gi;
       detectPattern(text, bearerPattern, "BEARER_TOKEN", matches, locations);
     }
 

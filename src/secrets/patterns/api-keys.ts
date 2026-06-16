@@ -26,9 +26,9 @@ export const apiKeysDetector: PatternDetector = {
       detectPattern(text, skPattern, "API_KEY_SK", matches, locations);
     }
 
-    // AWS access keys: AKIA followed by 16 uppercase alphanumeric chars
+    // AWS access keys: AKIA followed by 16+ uppercase alphanumeric chars
     if (enabledTypes.has("API_KEY_AWS")) {
-      const awsPattern = /AKIA[0-9A-Z]{16}/g;
+      const awsPattern = /AKIA[0-9A-Z]{16,}/g;
       detectPattern(text, awsPattern, "API_KEY_AWS", matches, locations);
     }
 
