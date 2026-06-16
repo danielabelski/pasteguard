@@ -87,9 +87,10 @@ For custom config, persistent logs, or other languages: **[Read the docs →](ht
 When using a fork or a branch with unmerged changes, pre-built images may not be available on GitHub Container Registry. Build the container locally:
 
 ```bash
-# Clone your fork
-git clone https://github.com/YOUR_USERNAME/pasteguard.git
+# Clone the fork with enhancements
+git clone https://github.com/danielabelski/pasteguard.git
 cd pasteguard
+git checkout master
 
 # Build with English language support only
 docker build -f docker/Dockerfile --build-arg LANGUAGES=en -t pasteguard:local .
