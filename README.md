@@ -82,6 +82,57 @@ For custom config, persistent logs, or other languages: **[Read the docs →](ht
 </details>
 
 <details>
+<summary><strong>Build from source</strong></summary>
+
+When using a fork or a branch with unmerged changes, pre-built images may not be available on GitHub Container Registry. Build the container locally:
+
+```bash
+# Clone your fork
+git clone https://github.com/YOUR_USERNAME/pasteguard.git
+cd pasteguard
+
+# Build with English language support only
+docker build -f docker/Dockerfile --build-arg LANGUAGES=en -t pasteguard:local .
+
+# Build with English + Russian support
+docker build -f docker/Dockerfile --build-arg LANGUAGES=en,ru -t pasteguard:local .
+
+# Run with custom config
+docker run --rm -p 3000:3000 \
+  -v ./config.yaml:/pasteguard/config.yaml \
+  -v ./data:/pasteguard/data \
+  pasteguard:local
+```
+
+**Build arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `LANGUAGES` | `en` | Comma-separated PII languages. See `docker/presidio/languages.yaml` for all options. |
+
+The build produces a combined image with PasteGuard proxy and Microsoft Presidio PII analyzer including spaCy models for the selected languages. No external registry push required.
+
+**Docker Compose example:**
+
+```yaml
+services:
+  pasteguard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        LANGUAGES: "en,ru"
+    image: pasteguard:local
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config.yaml:/pasteguard/config.yaml:ro
+      - ./data:/pasteguard/data
+```
+
+</details>
+
+<details>
 <summary><strong>Route Mode</strong></summary>
 
 Route Mode sends requests containing sensitive data to a local LLM (Ollama, vLLM, llama.cpp). Everything else goes to the configured cloud provider. Sensitive data stays on your network.
