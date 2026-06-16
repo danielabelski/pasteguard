@@ -110,6 +110,8 @@ const SecretEntityTypes = [
   "CONNECTION_STRING",
   "SLACK_TOKEN",
   "HF_TOKEN",
+  "GITLAB_TOKEN",
+  "GOOGLE_API_KEY",
   "GENERIC_API_KEY",
 ] as const;
 
