@@ -108,6 +108,9 @@ const SecretEntityTypes = [
   "ENV_PASSWORD",
   "ENV_SECRET",
   "CONNECTION_STRING",
+  "SLACK_TOKEN",
+  "HF_TOKEN",
+  "GENERIC_API_KEY",
 ] as const;
 
 const SecretsDetectionSchema = z.object({

@@ -5,7 +5,7 @@ import { detectPattern } from "./utils";
  * Environment variables detector
  *
  * Detects:
- * - ENV_PASSWORD: Password variables (_PASSWORD, _PWD suffix with 8+ char values)
+ * - ENV_PASSWORD: Password variables (_PASSWORD, _PWD suffix with 8+ char values) and inline password=/pwd= assignments
  * - ENV_SECRET: Secret variables (_SECRET suffix with 8+ char values)
  * - CONNECTION_STRING: Database URLs with embedded passwords (user:pass@host)
  */
@@ -18,10 +18,16 @@ export const envVarsDetector: PatternDetector = {
 
     // Environment variable password patterns: _PASSWORD or _PWD suffix with value (8+ chars)
     // Case-insensitive for variable name, supports = and : assignment, quoted/unquoted values
+    // Also catches inline password=... assignments (lowercase, not env-style)
     if (enabledTypes.has("ENV_PASSWORD")) {
-      const passwordPattern =
+      const pwEnvPattern =
         /[A-Za-z_][A-Za-z0-9_]*(?:PASSWORD|_PWD)\s*[=:]\s*['"]?[^\s'"]{8,}['"]?/gi;
-      detectPattern(text, passwordPattern, "ENV_PASSWORD", matches, locations);
+      detectPattern(text, pwEnvPattern, "ENV_PASSWORD", matches, locations);
+
+      // Inline password=... or password: ... or pwd=... assignments in free text
+      const pwInlinePattern =
+        /(?:(?<=^|[\s,;])password|passwd|pwd)\s*[=:]\s*['"]?[^\s'"]{8,}['"]?/gi;
+      detectPattern(text, pwInlinePattern, "ENV_PASSWORD", matches, locations);
     }
 
     // Environment variable secret patterns: _SECRET suffix with value (8+ chars)
@@ -35,7 +41,7 @@ export const envVarsDetector: PatternDetector = {
     // Supports: postgres, postgresql, mysql, mariadb, mongodb, mongodb+srv, redis, amqp, amqps
     if (enabledTypes.has("CONNECTION_STRING")) {
       const connectionPattern =
-        /(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?):\/\/[^:]+:[^@\s]+@[^\s'"]+/gi;
+        /(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?):\/\/(?:[^:]*:[^@\s]+@)[^\s'"]+/gi;
       detectPattern(text, connectionPattern, "CONNECTION_STRING", matches, locations);
     }
 

@@ -11,7 +11,10 @@ export type SecretEntityType =
   | "BEARER_TOKEN"
   | "ENV_PASSWORD"
   | "ENV_SECRET"
-  | "CONNECTION_STRING";
+  | "CONNECTION_STRING"
+  | "SLACK_TOKEN"
+  | "HF_TOKEN"
+  | "GENERIC_API_KEY";
 
 export interface SecretsMatch {
   type: SecretEntityType;
