@@ -22,10 +22,22 @@ function shannonEntropy(s: string): number {
  * Used in entropy detection: find keyword → grab next word → check entropy.
  */
 const SECRET_KEYWORDS = [
-  "password", "passwd", "pwd", "secret", "token", "api[_-]?key",
-  "api[_-]?secret", "access[_-]?token", "auth[_-]?token",
-  "client[_-]?secret", "refresh[_-]?token", "private[_-]?key",
-  "ssh[_-]?key", "secret[_-]?key", "bearer", "jwt",
+  "password",
+  "passwd",
+  "pwd",
+  "secret",
+  "token",
+  "api[_-]?key",
+  "api[_-]?secret",
+  "access[_-]?token",
+  "auth[_-]?token",
+  "client[_-]?secret",
+  "refresh[_-]?token",
+  "private[_-]?key",
+  "ssh[_-]?key",
+  "secret[_-]?key",
+  "bearer",
+  "jwt",
 ];
 
 const KEYWORD_PATTERN = new RegExp(

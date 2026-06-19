@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { AnthropicRequestSchema } from "../providers/anthropic/types";
-import { anthropicRoutes } from "./anthropic";
+import { anthropicRoutes, formatRequestForLog } from "./anthropic";
 
 const app = new Hono();
 app.route("/anthropic", anthropicRoutes);
@@ -67,6 +67,27 @@ describe("POST /anthropic/v1/messages", () => {
     });
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe("formatRequestForLog", () => {
+  test("logs only roles included in scan_roles", () => {
+    const result = formatRequestForLog(
+      {
+        model: "claude-3-sonnet-20240229",
+        max_tokens: 1024,
+        system: "hidden system",
+        messages: [
+          { role: "user", content: "keep me" },
+          { role: "assistant", content: "skip me" },
+        ],
+      },
+      new Set(["user"]),
+    );
+
+    expect(result).toContain("[user] keep me");
+    expect(result).not.toContain("hidden system");
+    expect(result).not.toContain("[assistant] skip me");
   });
 });
 
