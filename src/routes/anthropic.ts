@@ -110,6 +110,10 @@ anthropicRoutes.post(
       request = secretsResult.request;
     }
 
+    const scanRoles = config.pii_detection.scan_roles
+      ? new Set<string>(config.pii_detection.scan_roles as string[])
+      : undefined;
+
     // Step 2: Detect PII (skip if disabled)
     let piiResult: PIIDetectResult;
     if (!config.pii_detection.enabled) {
@@ -145,6 +149,7 @@ anthropicRoutes.post(
         startTime,
         piiResult,
         secretsResult,
+        scanRoles,
       });
     }
 
@@ -156,9 +161,9 @@ anthropicRoutes.post(
       const masked = maskPII(request, piiResult.detection, anthropicExtractor);
       request = masked.request;
       piiMaskingContext = masked.maskingContext;
-      maskedContent = formatRequestForLog(request);
+      maskedContent = formatRequestForLog(request, scanRoles);
     } else if (secretsResult.masked) {
-      maskedContent = formatRequestForLog(request);
+      maskedContent = formatRequestForLog(request, scanRoles);
     }
 
     // Step 5: Send to Anthropic
@@ -211,6 +216,7 @@ interface SendOptions {
   piiMaskingContext?: PlaceholderContext;
   secretsResult: SecretsProcessResult<AnthropicRequest>;
   maskedContent?: string;
+  scanRoles?: Set<string>;
 }
 
 interface LocalOptions {
@@ -218,19 +224,23 @@ interface LocalOptions {
   startTime: number;
   piiResult: PIIDetectResult;
   secretsResult: SecretsProcessResult<AnthropicRequest>;
+  scanRoles?: Set<string>;
 }
 
 // --- Helpers ---
 
-function formatRequestForLog(request: AnthropicRequest): string {
+export function formatRequestForLog(request: AnthropicRequest, scanRoles?: Set<string>): string {
   const parts: string[] = [];
 
-  if (request.system) {
-    const systemText = extractSystemText(request.system);
-    if (systemText) parts.push(`[system] ${systemText}`);
+  if (!scanRoles || scanRoles.has("system")) {
+    if (request.system) {
+      const systemText = extractSystemText(request.system);
+      if (systemText) parts.push(`[system] ${systemText}`);
+    }
   }
 
   for (const msg of request.messages) {
+    if (scanRoles && !scanRoles.has(msg.role)) continue;
     const text = extractAnthropicTextContent(msg.content);
     const isMultimodal = Array.isArray(msg.content);
     parts.push(`[${msg.role}${isMultimodal ? " multimodal" : ""}] ${text}`);
@@ -304,14 +314,14 @@ function respondDetectionError(
 
 async function sendToLocal(c: Context, originalRequest: AnthropicRequest, opts: LocalOptions) {
   const config = getConfig();
-  const { request, piiResult, secretsResult, startTime } = opts;
+  const { request, piiResult, secretsResult, startTime, scanRoles } = opts;
 
   if (!config.local) {
     throw new Error("Local provider not configured");
   }
 
   const maskedContent =
-    piiResult.hasPII || secretsResult.masked ? formatRequestForLog(request) : undefined;
+    piiResult.hasPII || secretsResult.masked ? formatRequestForLog(request, scanRoles) : undefined;
 
   setResponseHeaders(
     c,

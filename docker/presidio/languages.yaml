@@ -127,7 +127,7 @@ languages:
   # Russian
   ru:
     name: Russian
-    model: ru_core_news_lg
+    model: ru_core_news_md
     phone_context: [телефон, номер, мобильник, мобила, сотовый, звонок]
 
   # Slovenian
