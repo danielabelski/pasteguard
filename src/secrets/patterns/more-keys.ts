@@ -59,7 +59,7 @@ export const moreKeysDetector: PatternDetector = {
       // Tier 2: unquoted, must contain a digit or special char (real tokens always do),
       // and must NOT start with a pattern that looks like code (identifier+dot/paren/space+keyword)
       const genericUnquotedPattern =
-        /(?:(?:api[_-]?key|api[_-]?secret|access[_-]?token|auth[_-]?token|client[_-]?secret|refresh[_-]?token|token|password|secret)\s*[:=]\s*|(?:(?<=^|[\s,;])(?:api|secret|auth|access)\s+key)\s+)(?![A-Za-z_]\w*[\s.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.|getenv|environ)(?=\S*[\d!@#$%^&*+\-/\\])[a-zA-Z0-9_\-.!@#$%^&*+/\\]{16,}/gi;
+        /(?:(?:api[_-]?key|api[_-]?secret|access[_-]?token|auth[_-]?token|client[_-]?secret|refresh[_-]?token|token|password|secret)\s*[:=]\s*|(?:(?<=^|[\s,;])(?:api|secret|auth|access)\s+key)\s+)(?![A-Za-z_]\w*[.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.|getenv|environ)(?=\S*[\d!@#$%^&*+\-/\\])[a-zA-Z0-9_\-.!@#$%^&*+/\\]{16,}/gi;
       detectPattern(text, genericUnquotedPattern, "GENERIC_API_KEY", matches, locations);
     }
 

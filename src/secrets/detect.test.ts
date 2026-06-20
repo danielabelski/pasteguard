@@ -633,9 +633,13 @@ CACHE=redis://default:pass@redis:6379`;
   });
 
   test("avoids false positive - http/https URLs", () => {
+    // Fork behavior: embedded URL credentials (user:pass@host) are intentionally
+    // treated as a real secret, including over http/https. https is kept in the
+    // connection pattern on purpose, so this case IS detected.
     const text = "https://user:pass@example.com/api";
     const result = detectSecrets(text, connConfig);
-    expect(result.detected).toBe(false);
+    expect(result.detected).toBe(true);
+    expect(result.matches[0].type).toBe("CONNECTION_STRING");
   });
 
   test("location covers full connection string", () => {

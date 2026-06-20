@@ -60,9 +60,20 @@ export function detectSecrets(
   // Sort locations by start position (descending) for safe replacement
   allLocations.sort((a, b) => b.start - a.start);
 
+  // Merge match counts by type — a single type can be reported by multiple
+  // sub-patterns (e.g. quoted, unquoted-with-digit, and no-digit bareword tiers).
+  const mergedByType = new Map<string, number>();
+  for (const match of allMatches) {
+    mergedByType.set(match.type, (mergedByType.get(match.type) || 0) + match.count);
+  }
+  const mergedMatches: SecretsMatch[] = [];
+  for (const [type, count] of mergedByType) {
+    mergedMatches.push({ type: type as SecretsMatch["type"], count });
+  }
+
   return {
-    detected: allMatches.length > 0,
-    matches: allMatches,
+    detected: mergedMatches.length > 0,
+    matches: mergedMatches,
     locations: allLocations.length > 0 ? allLocations : undefined,
   };
 }

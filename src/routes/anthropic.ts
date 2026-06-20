@@ -32,6 +32,7 @@ import { unmaskSecretsResponse } from "../secrets/mask";
 import { logRequest } from "../services/logger";
 import { detectPII, maskPII, type PIIDetectResult } from "../services/pii";
 import { processSecretsRequest, type SecretsProcessResult } from "../services/secrets";
+import { hoistSystemMessages, sanitizeToolUseIds } from "./normalize";
 import {
   createLogData,
   errorFormats,
@@ -68,78 +69,11 @@ anthropicRoutes.post(
     const config = getConfig();
 
     // Hoist any role:"system" messages from the messages array into the top-level
-    // system field. Anthropic API doesn't support role:"system" in messages (it's
-    // a beta feature some clients use), but expects system content in the separate
-    // "system" field. This normalization prevents 400 errors from the upstream API.
-    if (Array.isArray(request.messages)) {
-      const systemTexts: string[] = [];
-      const filteredMessages = [];
-      for (const msg of request.messages) {
-        if (msg.role === "system") {
-          const text = typeof msg.content === "string"
-            ? msg.content
-            : Array.isArray(msg.content)
-              ? msg.content.map((b: unknown) => {
-                  if (typeof b === "string") return b;
-                  if (b && typeof b === "object" && "text" in b) return (b as { text: string }).text;
-                  return "";
-                }).join("\n")
-              : "";
-          if (text.trim()) systemTexts.push(text);
-        } else {
-          filteredMessages.push(msg);
-        }
-      }
-      if (systemTexts.length > 0) {
-        const existingSystem = typeof request.system === "string" && request.system.trim()
-          ? request.system + "\n"
-          : Array.isArray(request.system)
-            ? request.system.map((b: unknown) => {
-                if (typeof b === "string") return b;
-                if (b && typeof b === "object" && "text" in b) return (b as { text: string }).text;
-                return "";
-              }).join("\n") + "\n"
-            : "";
-        request = {
-          ...request,
-          system: existingSystem + systemTexts.join("\n"),
-          messages: filteredMessages,
-        };
-      }
-    }
-
-    // Sanitize tool_use.id and tool_use_id to match Anthropic's required pattern
-    // ^[a-zA-Z0-9_-]+$. Non-Claude models in combos may generate IDs with invalid
-    // characters (dots, colons, etc.) that cause 400 errors on the Anthropic API.
-    // Replace invalid chars consistently across the entire request so tool_use↔tool_result
-    // binding is preserved.
-    if (Array.isArray(request.messages)) {
-      const sanitizeId = (id: string): string => id.replace(/[^a-zA-Z0-9_-]/g, "_");
-      request = {
-        ...request,
-        messages: request.messages.map((msg) => {
-          if (!Array.isArray(msg.content)) return msg;
-          const content = msg.content.map((block: Record<string, unknown>) => {
-            // tool_use block: sanitize block.id
-            if (block.type === "tool_use" && typeof block.id === "string") {
-              const sanitized = sanitizeId(block.id);
-              if (sanitized !== block.id) {
-                return { ...block, id: sanitized };
-              }
-            }
-            // tool_result block: sanitize block.tool_use_id
-            if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
-              const sanitized = sanitizeId(block.tool_use_id);
-              if (sanitized !== block.tool_use_id) {
-                return { ...block, tool_use_id: sanitized };
-              }
-            }
-            return block;
-          });
-          return { ...msg, content };
-        }),
-      };
-    }
+    // system field, then sanitize tool_use.id / tool_result.tool_use_id to Anthropic's
+    // required id pattern. Both are pure normalizations (see routes/normalize.ts) that
+    // prevent 400 errors from the upstream API. Runtime behavior is unchanged.
+    request = hoistSystemMessages(request);
+    request = sanitizeToolUseIds(request);
 
     // Route mode requires local provider
     if (config.mode === "route" && !config.local) {
@@ -309,7 +243,7 @@ interface LocalOptions {
 
 // --- Helpers ---
 
-function formatRequestForLog(request: AnthropicRequest, scanRoles?: Set<string>): string {
+export function formatRequestForLog(request: AnthropicRequest, scanRoles?: Set<string>): string {
   const parts: string[] = [];
 
   // Only log system if it's being scanned (not filtered by scan_roles)
