@@ -259,23 +259,47 @@ describe("createAnthropicUnmaskingStream", () => {
     expect(result).toContain("Bob");
   });
 
-  test("handles tool_use deltas (input_json_delta)", async () => {
+  test("re-assembles and unmasks tool_use input_json_delta into a single delta", async () => {
     const context = createMaskingContext();
+    context.mapping["[[EMAIL_ADDRESS_1]]"] = "user@example.com";
 
-    const toolUseDelta = createAnthropicEvent("content_block_delta", {
-      type: "content_block_delta",
-      index: 0,
-      delta: { type: "input_json_delta", partial_json: '{"arg": "value"}' },
-    });
-    const source = createSSEStream([toolUseDelta]);
+    // A tool_use block whose JSON arguments are fragmented across input_json_delta
+    // events, with a placeholder split across two fragments.
+    const chunks = [
+      createAnthropicEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "toolu_1", name: "send", input: {} },
+      }),
+      createAnthropicEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '{"to":"[[EMAIL_' },
+      }),
+      createAnthropicEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: 'ADDRESS_1]]"}' },
+      }),
+      createAnthropicEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      createAnthropicEvent("message_stop", { type: "message_stop" }),
+    ];
+    const source = createSSEStream(chunks);
 
     const unmaskedStream = createAnthropicUnmaskingStream(source, context, defaultConfig);
     const result = await consumeStream(unmaskedStream);
+    const events = parseDataEvents(result);
 
-    // input_json_delta should pass through unchanged
-    expect(result).toContain("input_json_delta");
-    expect(result).toContain("arg");
-    expect(result).toContain("value");
+    // The fragmented JSON is re-assembled and unmasked into exactly one delta.
+    const jsonDeltas = events.filter((e) => e.delta?.type === "input_json_delta");
+    expect(jsonDeltas.length).toBe(1);
+    expect(jsonDeltas[0]?.index).toBe(0);
+    expect(jsonDeltas[0]?.delta?.partial_json).toBe('{"to":"user@example.com"}');
+
+    // The placeholder is fully restored; none leaks to the client.
+    expect(result).not.toContain("[[EMAIL_");
+    // Block framing is preserved (the input_json_delta precedes its stop).
+    expect(result).toContain("content_block_stop");
   });
 
   test("handles content_block_stop events", async () => {
@@ -348,5 +372,208 @@ describe("createAnthropicUnmaskingStream", () => {
 
     expect(result).toContain("Jane");
     expect(result).toContain("How are you?");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// BUG CONDITION EXPLORATION TESTS (Property 2: Bug Condition / sseCorruption)
+// These encode the EXPECTED (correct/fixed) behavior and are EXPECTED TO FAIL
+// on the current unfixed code, which unconditionally injects a stray
+// content_block_delta {index:0, text_delta} on flush and uses a single global
+// buffer that bleeds across blocks.
+// Spec: .kiro/specs/pasteguard-tools-passthrough-fix (Cause 2, branch sseCorruption)
+// **Validates: Requirements 1.3**
+// -----------------------------------------------------------------------------
+
+interface ParsedEvent {
+  type?: string;
+  index?: number;
+  delta?: { type?: string; text?: string; partial_json?: string };
+  content_block?: { type?: string };
+}
+
+/** Parse the ordered list of `data:` JSON events from transformer output. */
+function parseDataEvents(output: string): ParsedEvent[] {
+  const events: ParsedEvent[] = [];
+  for (const line of output.split("\n")) {
+    if (line.startsWith("data: ")) {
+      const payload = line.slice(6);
+      try {
+        events.push(JSON.parse(payload) as ParsedEvent);
+      } catch {
+        // ignore non-JSON data lines
+      }
+    }
+  }
+  return events;
+}
+
+function isTextDelta(e: ParsedEvent): boolean {
+  return e.type === "content_block_delta" && e.delta?.type === "text_delta";
+}
+
+describe("BUG: tool_use SSE structural integrity (Property 2 / sseCorruption)", () => {
+  test("does not inject a stray text_delta {index:0} on flush around a tool_use block", async () => {
+    const context = createMaskingContext();
+    context.mapping["[[EMAIL_ADDRESS_1]]"] = "user@example.com";
+
+    // Text block (index 0) ending with a partial placeholder that buffers,
+    // followed by a tool_use block (index 1).
+    const chunks = [
+      createAnthropicEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }),
+      createTextDelta("Contact [[EMAIL_ADDRESS_1", 0),
+      createAnthropicEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      createAnthropicEvent("content_block_start", {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "tool_use", id: "toolu_1", name: "lookup", input: {} },
+      }),
+      createAnthropicEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 1,
+        delta: { type: "input_json_delta", partial_json: '{"q":"x"}' },
+      }),
+      createAnthropicEvent("content_block_stop", { type: "content_block_stop", index: 1 }),
+      createAnthropicEvent("message_stop", { type: "message_stop" }),
+    ];
+    const source = createSSEStream(chunks);
+
+    const unmaskedStream = createAnthropicUnmaskingStream(source, context, defaultConfig);
+    const result = await consumeStream(unmaskedStream);
+    const events = parseDataEvents(result);
+
+    // Index of the tool_use block start
+    const toolStartIdx = events.findIndex(
+      (e) => e.type === "content_block_start" && e.content_block?.type === "tool_use",
+    );
+    expect(toolStartIdx).toBeGreaterThanOrEqual(0);
+
+    // EXPECTED (fixed) behavior: no text_delta is emitted after the tool_use
+    // block has started (the unconditional flush injection is the bug).
+    const strayAfterTool = events
+      .slice(toolStartIdx)
+      .find((e) => isTextDelta(e));
+    expect(strayAfterTool).toBeUndefined();
+  });
+
+  test("cross-block buffer does not bleed from text block into tool_use block", async () => {
+    const context = createMaskingContext();
+    context.mapping["[[EMAIL_ADDRESS_1]]"] = "user@example.com";
+
+    const chunks = [
+      createAnthropicEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }),
+      // Partial placeholder at the end of the text block -> buffered
+      createTextDelta("Email: [[EMAIL_", 0),
+      createAnthropicEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      createAnthropicEvent("content_block_start", {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "tool_use", id: "toolu_2", name: "lookup", input: {} },
+      }),
+      createAnthropicEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 1,
+        delta: { type: "input_json_delta", partial_json: '{"a":"b"}' },
+      }),
+      createAnthropicEvent("content_block_stop", { type: "content_block_stop", index: 1 }),
+      createAnthropicEvent("message_stop", { type: "message_stop" }),
+    ];
+    const source = createSSEStream(chunks);
+
+    const unmaskedStream = createAnthropicUnmaskingStream(source, context, defaultConfig);
+    const result = await consumeStream(unmaskedStream);
+    const events = parseDataEvents(result);
+
+    const toolStartIdx = events.findIndex(
+      (e) => e.type === "content_block_start" && e.content_block?.type === "tool_use",
+    );
+    expect(toolStartIdx).toBeGreaterThanOrEqual(0);
+
+    // EXPECTED (fixed) behavior: no content_block_delta carrying index 0 (the
+    // text block) may appear once the tool_use block (index 1) has started.
+    const bledDelta = events
+      .slice(toolStartIdx)
+      .find((e) => e.type === "content_block_delta" && e.index === 0);
+    expect(bledDelta).toBeUndefined();
+  });
+});
+
+
+// =============================================================================
+// PRESERVATION TESTS (Property 4 & 5: Preservation)
+// observation-first: lock in CURRENT (unfixed) behavior for plain-text SSE
+// streams with NO tool_use blocks (isBugCondition == false). MUST PASS on the
+// unfixed code and stay green after the fix.
+// Spec: .kiro/specs/pasteguard-tools-passthrough-fix
+// **Validates: Requirements 3.5, 3.6**
+// =============================================================================
+
+describe("PRESERVATION: Anthropic text stream parity (Property 4/5)", () => {
+  test("unmasks a complete placeholder in a plain-text stream (baseline)", async () => {
+    const context = createMaskingContext();
+    context.mapping["[[EMAIL_ADDRESS_1]]"] = "alice@example.com";
+
+    const source = createSSEStream([createTextDelta("Contact [[EMAIL_ADDRESS_1]] now")]);
+    const result = await consumeStream(
+      createAnthropicUnmaskingStream(source, context, defaultConfig),
+    );
+
+    expect(result).toContain("alice@example.com");
+    expect(result).not.toContain("[[EMAIL_ADDRESS_1]]");
+    // Streaming framing preserved: emitted as content_block_delta / text_delta
+    expect(result).toContain("event: content_block_delta");
+    const events = parseDataEvents(result);
+    expect(events.some(isTextDelta)).toBe(true);
+  });
+
+  test("buffers a partial placeholder split across chunks in a text stream (baseline)", async () => {
+    const context = createMaskingContext();
+    context.mapping["[[EMAIL_ADDRESS_1]]"] = "a@b.com";
+
+    const source = createSSEStream([
+      createTextDelta("Hello [[EMAIL_"),
+      createTextDelta("ADDRESS_1]] world"),
+    ]);
+    const result = await consumeStream(
+      createAnthropicUnmaskingStream(source, context, defaultConfig),
+    );
+
+    expect(result).toContain("a@b.com");
+    expect(result).not.toContain("[[EMAIL_");
+  });
+
+  test("unmasks both PII and secrets in a plain-text stream (baseline)", async () => {
+    const piiContext = createMaskingContext();
+    piiContext.mapping["[[PERSON_1]]"] = "Alice";
+    const secretsContext = createMaskingContext();
+    secretsContext.mapping["[[SECRET_API_KEY_1]]"] = "sk-12345";
+
+    const source = createSSEStream([
+      createTextDelta("[[PERSON_1]]'s key: [[SECRET_API_KEY_1]]"),
+    ]);
+    const result = await consumeStream(
+      createAnthropicUnmaskingStream(source, piiContext, defaultConfig, secretsContext),
+    );
+
+    expect(result).toContain("Alice");
+    expect(result).toContain("sk-12345");
+    expect(result).not.toContain("[[");
+  });
+
+  test("passes plain text without placeholders through unchanged (baseline)", async () => {
+    const source = createSSEStream([createTextDelta("A normal sentence with no placeholders.")]);
+    const result = await consumeStream(
+      createAnthropicUnmaskingStream(source, undefined, defaultConfig),
+    );
+
+    expect(result).toContain("A normal sentence with no placeholders.");
   });
 });

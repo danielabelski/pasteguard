@@ -105,6 +105,11 @@ openaiRoutes.post(
 
     // Step 3: Process based on mode
     if (config.mode === "mask") {
+      // In debug mode, ALWAYS capture original content (before any masking)
+      let originalContent: string | undefined;
+      if (config.logging.debug) {
+        originalContent = formatMessagesForLog(request.messages);
+      }
       const piiMasked = maskPII(request, piiResult.detection, openaiExtractor);
       return sendToOpenAI(c, request, {
         request: piiMasked.request,
@@ -113,6 +118,7 @@ openaiRoutes.post(
         secretsResult,
         startTime,
         authHeader: c.req.header("Authorization"),
+        originalContent,
       });
     }
 
@@ -168,6 +174,7 @@ interface OpenAIOptions {
   secretsResult: SecretsProcessResult<OpenAIRequest>;
   startTime: number;
   authHeader?: string;
+  originalContent?: string;
 }
 
 interface LocalOptions {
@@ -253,6 +260,25 @@ async function sendToOpenAI(c: Context, originalRequest: OpenAIRequest, opts: Op
 
   const maskedContent =
     piiResult.hasPII || secretsResult.masked ? formatMessagesForLog(request.messages) : undefined;
+
+  // Debug logging: show what came in vs what goes to upstream
+  if (config.logging.debug) {
+    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    console.log(`\n[DEBUG][${reqId}] ====== OPENAI REQUEST ======`);
+    console.log(`[DEBUG][${reqId}] Model: ${request.model} | Stream: ${request.stream ?? "default"}`);
+    console.log(`[DEBUG][${reqId}] PII detected: ${piiResult.hasPII} | Secrets masked: ${secretsResult.masked ?? false}`);
+    if (opts.originalContent) {
+      console.log(`[DEBUG][${reqId}] --- ORIGINAL (from client) ---`);
+      console.log(opts.originalContent.split("\n").map(l => `[DEBUG][${reqId}]   ${l}`).join("\n"));
+    }
+    if (maskedContent) {
+      console.log(`[DEBUG][${reqId}] --- MASKED (sent to upstream) ---`);
+      console.log(maskedContent.split("\n").map(l => `[DEBUG][${reqId}]   ${l}`).join("\n"));
+    } else {
+      console.log(`[DEBUG][${reqId}] --- NO MASKING (passthrough, same as original) ---`);
+    }
+    console.log(`[DEBUG][${reqId}] ==============================\n`);
+  }
 
   setResponseHeaders(
     c,

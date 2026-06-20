@@ -31,6 +31,7 @@ export interface AnthropicClientHeaders {
   apiKey?: string;
   authorization?: string;
   beta?: string;
+  userAgent?: string;
 }
 
 /**
@@ -44,7 +45,7 @@ export async function callAnthropic(
   config: AnthropicProviderConfig,
   clientHeaders?: AnthropicClientHeaders,
 ): Promise<AnthropicResult> {
-  const isStreaming = true;
+  const isStreaming = request.stream ?? false;
   const baseUrl = (config.base_url || DEFAULT_ANTHROPIC_URL).replace(/\/$/, "");
 
   const headers: Record<string, string> = {
@@ -67,11 +68,17 @@ export async function callAnthropic(
     headers["anthropic-beta"] = clientHeaders.beta;
   }
 
+  // Forward User-Agent so upstream (e.g. 9router) can detect the client tool
+  // and apply client-specific normalization (e.g. hoisting system-role messages)
+  if (clientHeaders?.userAgent) {
+    headers["User-Agent"] = clientHeaders.userAgent;
+  }
+
   const timeoutMs = getConfig().server.request_timeout * 1000;
   const response = await fetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ ...request, stream: true }),
+    body: JSON.stringify({ ...request, stream: isStreaming }),
     signal: timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined,
   });
 

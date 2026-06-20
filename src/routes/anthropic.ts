@@ -67,6 +67,80 @@ anthropicRoutes.post(
     let request = c.req.valid("json") as AnthropicRequest;
     const config = getConfig();
 
+    // Hoist any role:"system" messages from the messages array into the top-level
+    // system field. Anthropic API doesn't support role:"system" in messages (it's
+    // a beta feature some clients use), but expects system content in the separate
+    // "system" field. This normalization prevents 400 errors from the upstream API.
+    if (Array.isArray(request.messages)) {
+      const systemTexts: string[] = [];
+      const filteredMessages = [];
+      for (const msg of request.messages) {
+        if (msg.role === "system") {
+          const text = typeof msg.content === "string"
+            ? msg.content
+            : Array.isArray(msg.content)
+              ? msg.content.map((b: unknown) => {
+                  if (typeof b === "string") return b;
+                  if (b && typeof b === "object" && "text" in b) return (b as { text: string }).text;
+                  return "";
+                }).join("\n")
+              : "";
+          if (text.trim()) systemTexts.push(text);
+        } else {
+          filteredMessages.push(msg);
+        }
+      }
+      if (systemTexts.length > 0) {
+        const existingSystem = typeof request.system === "string" && request.system.trim()
+          ? request.system + "\n"
+          : Array.isArray(request.system)
+            ? request.system.map((b: unknown) => {
+                if (typeof b === "string") return b;
+                if (b && typeof b === "object" && "text" in b) return (b as { text: string }).text;
+                return "";
+              }).join("\n") + "\n"
+            : "";
+        request = {
+          ...request,
+          system: existingSystem + systemTexts.join("\n"),
+          messages: filteredMessages,
+        };
+      }
+    }
+
+    // Sanitize tool_use.id and tool_use_id to match Anthropic's required pattern
+    // ^[a-zA-Z0-9_-]+$. Non-Claude models in combos may generate IDs with invalid
+    // characters (dots, colons, etc.) that cause 400 errors on the Anthropic API.
+    // Replace invalid chars consistently across the entire request so tool_use↔tool_result
+    // binding is preserved.
+    if (Array.isArray(request.messages)) {
+      const sanitizeId = (id: string): string => id.replace(/[^a-zA-Z0-9_-]/g, "_");
+      request = {
+        ...request,
+        messages: request.messages.map((msg) => {
+          if (!Array.isArray(msg.content)) return msg;
+          const content = msg.content.map((block: Record<string, unknown>) => {
+            // tool_use block: sanitize block.id
+            if (block.type === "tool_use" && typeof block.id === "string") {
+              const sanitized = sanitizeId(block.id);
+              if (sanitized !== block.id) {
+                return { ...block, id: sanitized };
+              }
+            }
+            // tool_result block: sanitize block.tool_use_id
+            if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
+              const sanitized = sanitizeId(block.tool_use_id);
+              if (sanitized !== block.tool_use_id) {
+                return { ...block, tool_use_id: sanitized };
+              }
+            }
+            return block;
+          });
+          return { ...msg, content };
+        }),
+      };
+    }
+
     // Route mode requires local provider
     if (config.mode === "route" && !config.local) {
       return respondError(c, "Route mode requires local provider configuration.", 400);
@@ -110,10 +184,6 @@ anthropicRoutes.post(
       request = secretsResult.request;
     }
 
-    const scanRoles = config.pii_detection.scan_roles
-      ? new Set<string>(config.pii_detection.scan_roles as string[])
-      : undefined;
-
     // Step 2: Detect PII (skip if disabled)
     let piiResult: PIIDetectResult;
     if (!config.pii_detection.enabled) {
@@ -149,21 +219,29 @@ anthropicRoutes.post(
         startTime,
         piiResult,
         secretsResult,
-        scanRoles,
       });
     }
 
     // Step 4: Mask mode - mask PII if found, send to Anthropic
     let piiMaskingContext: PlaceholderContext | undefined;
     let maskedContent: string | undefined;
+    let originalContent: string | undefined;
+
+    // Build scanRoles for formatRequestForLog
+    const scanRolesForLog = config.pii_detection.scan_roles ? new Set<string>(config.pii_detection.scan_roles as string[]) : undefined;
+
+    // In debug mode, ALWAYS capture original content (before any masking)
+    if (config.logging.debug) {
+      originalContent = formatRequestForLog(request, scanRolesForLog);
+    }
 
     if (piiResult.hasPII) {
       const masked = maskPII(request, piiResult.detection, anthropicExtractor);
       request = masked.request;
       piiMaskingContext = masked.maskingContext;
-      maskedContent = formatRequestForLog(request, scanRoles);
+      maskedContent = formatRequestForLog(request, scanRolesForLog);
     } else if (secretsResult.masked) {
-      maskedContent = formatRequestForLog(request, scanRoles);
+      maskedContent = formatRequestForLog(request, scanRolesForLog);
     }
 
     // Step 5: Send to Anthropic
@@ -173,6 +251,7 @@ anthropicRoutes.post(
       piiMaskingContext,
       secretsResult,
       maskedContent,
+      originalContent,
     });
   },
 );
@@ -216,6 +295,7 @@ interface SendOptions {
   piiMaskingContext?: PlaceholderContext;
   secretsResult: SecretsProcessResult<AnthropicRequest>;
   maskedContent?: string;
+  originalContent?: string;
   scanRoles?: Set<string>;
 }
 
@@ -229,14 +309,15 @@ interface LocalOptions {
 
 // --- Helpers ---
 
-export function formatRequestForLog(request: AnthropicRequest, scanRoles?: Set<string>): string {
+function formatRequestForLog(request: AnthropicRequest, scanRoles?: Set<string>): string {
   const parts: string[] = [];
 
-  if (!scanRoles || scanRoles.has("system")) {
-    if (request.system) {
-      const systemText = extractSystemText(request.system);
-      if (systemText) parts.push(`[system] ${systemText}`);
-    }
+  // Only log system if it's being scanned (not filtered by scan_roles)
+  if (scanRoles && !scanRoles.has("system")) {
+    // system filtered out — skip
+  } else if (request.system) {
+    const systemText = extractSystemText(request.system);
+    if (systemText) parts.push(`[system] ${systemText}`);
   }
 
   for (const msg of request.messages) {
@@ -314,14 +395,14 @@ function respondDetectionError(
 
 async function sendToLocal(c: Context, originalRequest: AnthropicRequest, opts: LocalOptions) {
   const config = getConfig();
-  const { request, piiResult, secretsResult, startTime, scanRoles } = opts;
+  const { request, piiResult, secretsResult, startTime } = opts;
 
   if (!config.local) {
     throw new Error("Local provider not configured");
   }
 
   const maskedContent =
-    piiResult.hasPII || secretsResult.masked ? formatRequestForLog(request, scanRoles) : undefined;
+    piiResult.hasPII || secretsResult.masked ? formatRequestForLog(request) : undefined;
 
   setResponseHeaders(
     c,
@@ -376,6 +457,25 @@ async function sendToAnthropic(c: Context, request: AnthropicRequest, opts: Send
   const config = getConfig();
   const { startTime, piiResult, piiMaskingContext, secretsResult, maskedContent } = opts;
 
+  // Debug logging: show what came in (original) vs what goes to upstream (masked)
+  if (config.logging.debug) {
+    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    console.log(`\n[DEBUG][${reqId}] ====== ANTHROPIC REQUEST ======`);
+    console.log(`[DEBUG][${reqId}] Model: ${request.model} | Stream: ${request.stream ?? "default"}`);
+    console.log(`[DEBUG][${reqId}] PII detected: ${piiResult.hasPII} | Secrets masked: ${secretsResult.masked ?? false}`);
+    if (opts.originalContent) {
+      console.log(`[DEBUG][${reqId}] --- ORIGINAL (from client) ---`);
+      console.log(opts.originalContent.split("\n").map(l => `[DEBUG][${reqId}]   ${l}`).join("\n"));
+    }
+    if (maskedContent) {
+      console.log(`[DEBUG][${reqId}] --- MASKED (sent to upstream) ---`);
+      console.log(maskedContent.split("\n").map(l => `[DEBUG][${reqId}]   ${l}`).join("\n"));
+    } else {
+      console.log(`[DEBUG][${reqId}] --- NO MASKING (passthrough, same as original) ---`);
+    }
+    console.log(`[DEBUG][${reqId}] ================================\n`);
+  }
+
   setResponseHeaders(
     c,
     config.mode,
@@ -388,6 +488,7 @@ async function sendToAnthropic(c: Context, request: AnthropicRequest, opts: Send
     apiKey: c.req.header("x-api-key"),
     authorization: c.req.header("Authorization"),
     beta: c.req.header("anthropic-beta"),
+    userAgent: c.req.header("User-Agent"),
   };
 
   try {

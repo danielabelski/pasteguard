@@ -40,18 +40,27 @@ export const moreKeysDetector: PatternDetector = {
       detectPattern(text, gitlabPattern, "GITLAB_TOKEN", matches, locations);
     }
 
-    // Google API keys: AIza followed by 35 alphanumeric chars
+    // Google API keys: AIza followed by 35+ alphanumeric chars
     if (enabledTypes.has("GOOGLE_API_KEY")) {
-      const googlePattern = /AIza[0-9A-Za-z\-_]{35}/g;
+      const googlePattern = /AIza[0-9A-Za-z\-_]{35,}/g;
       detectPattern(text, googlePattern, "GOOGLE_API_KEY", matches, locations);
     }
 
     // Generic API key assignment: api_key/access_token/client_secret = "value"
     // Also matches "key is ...", "api key ...", "secret key = ..." etc.
+    // Two-tier: quoted values always match; unquoted must contain digit/special char
+    // and NOT look like a code expression (variable reference, function call, keyword)
     if (enabledTypes.has("GENERIC_API_KEY")) {
-      const genericPattern =
-        /(?:(?:api[_-]?key|api[_-]?secret|access[_-]?token|auth[_-]?token|client[_-]?secret|refresh[_-]?token)\s*[:=]\s*|(?:(?<=^|[\s,;])(?:api|secret|auth|access)\s+key)\s+)\s*['"]?[a-zA-Z0-9_\-.]{16,}['"]?/gi;
-      detectPattern(text, genericPattern, "GENERIC_API_KEY", matches, locations);
+      // Tier 1: quoted values (high confidence — hardcoded literal)
+      const genericQuotedPattern =
+        /(?:(?:api[_-]?key|api[_-]?secret|access[_-]?token|auth[_-]?token|client[_-]?secret|refresh[_-]?token|token|password|secret)\s*[:=]\s*|(?:(?<=^|[\s,;])(?:api|secret|auth|access)\s+key)\s+)\s*['"][a-zA-Z0-9_\-.]{16,}['"]/gi;
+      detectPattern(text, genericQuotedPattern, "GENERIC_API_KEY", matches, locations);
+
+      // Tier 2: unquoted, must contain a digit or special char (real tokens always do),
+      // and must NOT start with a pattern that looks like code (identifier+dot/paren/space+keyword)
+      const genericUnquotedPattern =
+        /(?:(?:api[_-]?key|api[_-]?secret|access[_-]?token|auth[_-]?token|client[_-]?secret|refresh[_-]?token|token|password|secret)\s*[:=]\s*|(?:(?<=^|[\s,;])(?:api|secret|auth|access)\s+key)\s+)(?![A-Za-z_]\w*[\s.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.|getenv|environ)(?=\S*[\d!@#$%^&*+\-/\\])[a-zA-Z0-9_\-.!@#$%^&*+/\\]{16,}/gi;
+      detectPattern(text, genericUnquotedPattern, "GENERIC_API_KEY", matches, locations);
     }
 
     return {

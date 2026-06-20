@@ -39,6 +39,79 @@ function unmaskContent(
   return content;
 }
 
+/** Shape of a tool call's function payload we need to unmask. */
+interface ToolCallFunction {
+  name?: string;
+  arguments?: unknown;
+}
+
+interface ToolCall {
+  function?: ToolCallFunction;
+}
+
+/**
+ * Restores placeholders inside a tool call's `function.arguments`.
+ *
+ * `arguments` is a serialized JSON string. Placeholders use the `[[TYPE_N]]`
+ * format and contain no JSON metacharacters, so restoring them directly in the
+ * serialized string keeps the JSON valid. Non-string `arguments` and other
+ * fields (id, type, name) are preserved untouched.
+ */
+function unmaskToolCallArguments<T extends { function?: ToolCallFunction }>(
+  toolCall: T,
+  context: PlaceholderContext,
+  formatValue?: (original: string) => string,
+): T {
+  const fn = toolCall.function;
+  if (!fn || typeof fn.arguments !== "string") {
+    return toolCall;
+  }
+
+  return {
+    ...toolCall,
+    function: {
+      ...fn,
+      arguments: restorePlaceholders(fn.arguments, context, formatValue),
+    },
+  };
+}
+
+/**
+ * Restores placeholders in a response message's tool-call payloads:
+ * `tool_calls[].function.arguments` (and legacy `function_call.arguments`).
+ *
+ * Returns a new message object; all other fields are preserved.
+ */
+function unmaskMessageToolCalls<T extends Record<string, unknown>>(
+  message: T,
+  context: PlaceholderContext,
+  formatValue?: (original: string) => string,
+): T {
+  const result: Record<string, unknown> = { ...message };
+
+  const toolCalls = message.tool_calls;
+  if (Array.isArray(toolCalls)) {
+    result.tool_calls = toolCalls.map((toolCall) =>
+      toolCall && typeof toolCall === "object"
+        ? unmaskToolCallArguments(toolCall as ToolCall, context, formatValue)
+        : toolCall,
+    );
+  }
+
+  const functionCall = message.function_call;
+  if (functionCall && typeof functionCall === "object") {
+    const fn = functionCall as ToolCallFunction;
+    if (typeof fn.arguments === "string") {
+      result.function_call = {
+        ...fn,
+        arguments: restorePlaceholders(fn.arguments, context, formatValue),
+      };
+    }
+  }
+
+  return result as T;
+}
+
 /**
  * OpenAI request extractor
  *
@@ -123,13 +196,23 @@ export const openaiExtractor: RequestExtractor<OpenAIRequest, OpenAIResponse> = 
   ): OpenAIResponse {
     return {
       ...response,
-      choices: response.choices.map((choice) => ({
-        ...choice,
-        message: {
+      choices: response.choices.map((choice) => {
+        const messageWithContent = {
           ...choice.message,
           content: unmaskContent(choice.message.content, context, formatValue),
-        },
-      })),
+        };
+        // Also restore placeholders in tool-call arguments (tool_calls[].function.arguments
+        // and legacy function_call.arguments), preserving all other fields.
+        const message = unmaskMessageToolCalls(
+          messageWithContent as unknown as Record<string, unknown>,
+          context,
+          formatValue,
+        ) as unknown as OpenAIResponse["choices"][number]["message"];
+        return {
+          ...choice,
+          message,
+        };
+      }),
     };
   },
 };
