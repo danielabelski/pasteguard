@@ -19,7 +19,9 @@ import type {
   ThinkingBlock,
   ToolResultBlock,
 } from "../../providers/anthropic/types";
+import type { OpenAIResponse } from "../../providers/openai/types";
 import type { MaskedSpan, RequestExtractor, TextSpan } from "../types";
+import { openaiExtractor } from "./openai";
 
 /** System content uses messageIndex -1 */
 const SYSTEM_MESSAGE_INDEX = -1;
@@ -287,14 +289,70 @@ export const anthropicExtractor: RequestExtractor<AnthropicRequest, AnthropicRes
       return result;
     };
 
+    // Tolerate non-Anthropic bodies on the /anthropic endpoint.
+    // 9router combo aliases (e.g. haiku/sonnet) may return an OpenAI-shaped
+    // chat.completion JSON ({ object: "chat.completion", choices: [...] }) with
+    // NO top-level `content` array. Dereferencing `response.content.map` on such
+    // a body throws and surfaces as HTTP 502. Detect the body shape first.
+    if (!Array.isArray(response.content)) {
+      // OpenAI-shaped body: unmask via the OpenAI extractor (handles
+      // choices[].message.content + tool_calls[].function.arguments + legacy
+      // function_call.arguments), preserving structure.
+      // biome-ignore lint/suspicious/noExplicitAny: cross-format body on /anthropic
+      const maybeOpenAI = response as any;
+      if (Array.isArray(maybeOpenAI.choices)) {
+        return openaiExtractor.unmaskResponse(
+          maybeOpenAI as OpenAIResponse,
+          context,
+          formatValue,
+          // biome-ignore lint/suspicious/noExplicitAny: returning cross-format body unchanged-in-type
+        ) as any;
+      }
+      // Unknown shape: return unchanged rather than throwing.
+      return response;
+    }
+
     return {
       ...response,
       content: response.content.map((block) => {
         if (block.type === "text") {
           return { ...block, text: unmaskText((block as TextBlock).text) };
         }
+        if (block.type === "tool_use") {
+          // Restore placeholders that may have leaked into tool call arguments.
+          // Walk the input object recursively, unmasking every string leaf while
+          // preserving structure, arrays, numbers, booleans and keys unchanged.
+          // biome-ignore lint/suspicious/noExplicitAny: tool_use block input is provider-shaped
+          const toolBlock = block as any;
+          return { ...toolBlock, input: unmaskDeep(toolBlock.input, unmaskText) };
+        }
         return block;
       }),
     };
   },
 };
+
+/**
+ * Recursively restore placeholders in every string leaf of a value.
+ *
+ * - Strings are unmasked via `unmaskText`.
+ * - Arrays are mapped element-wise, preserving order and length.
+ * - Plain objects are walked value-by-value, preserving keys.
+ * - Numbers, booleans, null and other primitives pass through unchanged.
+ */
+function unmaskDeep(value: unknown, unmaskText: (text: string) => string): unknown {
+  if (typeof value === "string") {
+    return unmaskText(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => unmaskDeep(item, unmaskText));
+  }
+  if (value !== null && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      result[key] = unmaskDeep(val, unmaskText);
+    }
+    return result;
+  }
+  return value;
+}

@@ -738,6 +738,169 @@ describe("Anthropic Text Extractor", () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // BUG CONDITION EXPLORATION TESTS (Property 1: Bug Condition)
+  // These encode the EXPECTED (correct/fixed) behavior and are EXPECTED TO FAIL
+  // on the current unfixed code. A failure here confirms the bug exists.
+  // Spec: .kiro/specs/pasteguard-tools-passthrough-fix (Cause 1, branch argsLeak)
+  // **Validates: Requirements 1.2, 1.4**
+  // ---------------------------------------------------------------------------
+  describe("BUG: tool_use.input unmask leak (Property 1 / argsLeak)", () => {
+    test("restores placeholders inside tool_use.input (non-stream)", () => {
+      const response: AnthropicResponse = {
+        id: "msg_tooluse",
+        type: "message",
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me look that up." },
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: "send_email",
+            input: {
+              to: "[[EMAIL_ADDRESS_1]]",
+              cc: ["[[EMAIL_ADDRESS_1]]", "team@corp.com"],
+              subject: "Hello [[PERSON_1]]",
+              count: 3,
+              flag: true,
+            },
+            // biome-ignore lint/suspicious/noExplicitAny: tool_use block in response content
+          } as any,
+        ],
+        model: "claude-3-sonnet-20240229",
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 5 },
+      };
+
+      const context: PlaceholderContext = {
+        mapping: {
+          "[[EMAIL_ADDRESS_1]]": "user@example.com",
+          "[[PERSON_1]]": "Alice",
+        },
+        reverseMapping: {
+          "user@example.com": "[[EMAIL_ADDRESS_1]]",
+          Alice: "[[PERSON_1]]",
+        },
+        counters: { EMAIL_ADDRESS: 1, PERSON: 1 },
+      };
+
+      const result = anthropicExtractor.unmaskResponse(response, context);
+
+      // biome-ignore lint/suspicious/noExplicitAny: reading tool_use input in assertion
+      const toolBlock = result.content[1] as any;
+      expect(toolBlock.type).toBe("tool_use");
+      // EXPECTED (fixed) behavior: every placeholder leaf is restored
+      expect(toolBlock.input.to).toBe("user@example.com");
+      expect(toolBlock.input.cc).toEqual(["user@example.com", "team@corp.com"]);
+      expect(toolBlock.input.subject).toBe("Hello Alice");
+      // Structure / non-string leaves are preserved as-is
+      expect(toolBlock.input.count).toBe(3);
+      expect(toolBlock.input.flag).toBe(true);
+      expect(toolBlock.id).toBe("toolu_1");
+      expect(toolBlock.name).toBe("send_email");
+      // Serialized form must contain no leftover placeholders
+      expect(JSON.stringify(result.content)).not.toContain("[[");
+      // Text block still unmasked as before
+      // biome-ignore lint/suspicious/noExplicitAny: reading text block
+      expect((result.content[0] as any).text).toBe("Let me look that up.");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // BUG CONDITION EXPLORATION TEST — OpenAI-shaped body on /anthropic (502 fix)
+  // Discovered in e2e (task 4.1): after fix 3.3 made the non-streaming Anthropic
+  // path reachable, 9router combo aliases (haiku/sonnet) return an OpenAI-shaped
+  // JSON body on /anthropic ({ object: "chat.completion", choices: [...] } with
+  // NO top-level `content` array). The old unmaskResponse did `response.content.map`
+  // and threw `TypeError: undefined is not an object`, producing HTTP 502.
+  // This test encodes the EXPECTED (fixed) behavior: no throw + placeholders
+  // restored in the OpenAI-shaped body. It MUST FAIL on the unfixed code.
+  // Spec: .kiro/specs/pasteguard-tools-passthrough-fix (task 3.8)
+  // **Validates: Requirements 2.1, 2.5**
+  // ---------------------------------------------------------------------------
+  describe("BUG: OpenAI-shaped body tolerance (task 3.8 / 502 fix)", () => {
+    const context: PlaceholderContext = {
+      mapping: {
+        "[[EMAIL_ADDRESS_1]]": "user@example.com",
+        "[[PERSON_1]]": "Alice",
+      },
+      reverseMapping: {
+        "user@example.com": "[[EMAIL_ADDRESS_1]]",
+        Alice: "[[PERSON_1]]",
+      },
+      counters: { EMAIL_ADDRESS: 1, PERSON: 1 },
+    };
+
+    // Build an OpenAI chat.completion body as returned by 9router combo aliases.
+    function openAiShapedBody() {
+      return {
+        id: "chatcmpl_combo",
+        object: "chat.completion",
+        created: 1,
+        model: "minimax/MiniMax-Text-01",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: "Hello [[PERSON_1]], your email is [[EMAIL_ADDRESS_1]]",
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: {
+                    name: "send_email",
+                    arguments: '{"to":"[[EMAIL_ADDRESS_1]]","subject":"Hi [[PERSON_1]]"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: "stop",
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        // biome-ignore lint/suspicious/noExplicitAny: cross-shaped body passed to anthropic unmask
+      } as any;
+    }
+
+    test("does not throw on a body with no top-level content array", () => {
+      expect(() =>
+        anthropicExtractor.unmaskResponse(openAiShapedBody(), context),
+      ).not.toThrow();
+    });
+
+    test("restores placeholders in OpenAI-shaped message.content and tool_calls", () => {
+      // biome-ignore lint/suspicious/noExplicitAny: cross-shaped result inspected in assertions
+      const result = anthropicExtractor.unmaskResponse(openAiShapedBody(), context) as any;
+
+      const message = result.choices[0].message;
+      expect(message.content).toBe("Hello Alice, your email is user@example.com");
+      expect(message.tool_calls[0].function.arguments).toBe(
+        '{"to":"user@example.com","subject":"Hi Alice"}',
+      );
+      // Other fields preserved
+      expect(message.tool_calls[0].id).toBe("call_1");
+      expect(message.tool_calls[0].function.name).toBe("send_email");
+      expect(result.object).toBe("chat.completion");
+      // No leftover placeholders anywhere
+      expect(JSON.stringify(result)).not.toContain("[[");
+    });
+
+    test("returns an unrecognized body shape unchanged instead of throwing", () => {
+      // Neither an Anthropic message (content[]) nor OpenAI-shaped (choices[]).
+      // biome-ignore lint/suspicious/noExplicitAny: deliberately malformed body
+      const weird = { id: "x", object: "unknown", note: "[[PERSON_1]]" } as any;
+      // biome-ignore lint/suspicious/noExplicitAny: inspecting passthrough result
+      let result: any;
+      expect(() => {
+        result = anthropicExtractor.unmaskResponse(weird, context);
+      }).not.toThrow();
+      // Passed through unchanged (no Anthropic/OpenAI structure to unmask)
+      expect(result).toEqual(weird);
+    });
+  });
+
   describe("cache_control preservation", () => {
     test("preserves cache_control on text block through applyMasked", () => {
       const request = createRequest([
@@ -857,5 +1020,118 @@ describe("Anthropic Text Extractor", () => {
 
       expect(block.cache_control).toEqual({ type: "ephemeral" });
     });
+  });
+});
+
+
+// =============================================================================
+// PRESERVATION TESTS (Property 4 & 5: Preservation)
+// observation-first: these lock in the CURRENT (unfixed) behavior for inputs
+// where isBugCondition is FALSE (plain text, no tools, mode not forced).
+// They MUST PASS on the unfixed code and MUST keep passing after the fix.
+// Spec: .kiro/specs/pasteguard-tools-passthrough-fix
+// **Validates: Requirements 3.1, 3.3, 3.5**
+// =============================================================================
+
+describe("PRESERVATION: Anthropic text unmask parity (Property 4)", () => {
+  test("restores placeholders in plain-text response content (baseline)", () => {
+    const response: AnthropicResponse = {
+      id: "msg_pres_1",
+      type: "message",
+      role: "assistant",
+      content: [
+        { type: "text", text: "Hi [[PERSON_1]], reach me at [[EMAIL_ADDRESS_1]]" },
+        { type: "text", text: "Second mention of [[PERSON_1]]." },
+      ],
+      model: "claude-3-sonnet-20240229",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 5 },
+    };
+
+    const context: PlaceholderContext = {
+      mapping: { "[[PERSON_1]]": "Alice", "[[EMAIL_ADDRESS_1]]": "alice@example.com" },
+      reverseMapping: { Alice: "[[PERSON_1]]", "alice@example.com": "[[EMAIL_ADDRESS_1]]" },
+      counters: { PERSON: 1, EMAIL_ADDRESS: 1 },
+    };
+
+    const result = anthropicExtractor.unmaskResponse(response, context);
+
+    // Baseline: text blocks fully restored, no placeholder remnants
+    expect((result.content[0] as { text: string }).text).toBe(
+      "Hi Alice, reach me at alice@example.com",
+    );
+    expect((result.content[1] as { text: string }).text).toBe("Second mention of Alice.");
+    expect(JSON.stringify(result.content)).not.toContain("[[");
+    // Structure preserved
+    expect(result.id).toBe("msg_pres_1");
+    expect(result.content).toHaveLength(2);
+  });
+
+  test("leaves text without placeholders untouched (baseline)", () => {
+    const response: AnthropicResponse = {
+      id: "msg_pres_2",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: "Just a normal sentence." }],
+      model: "claude-3-sonnet-20240229",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const context: PlaceholderContext = {
+      mapping: { "[[PERSON_1]]": "Alice" },
+      reverseMapping: { Alice: "[[PERSON_1]]" },
+      counters: { PERSON: 1 },
+    };
+
+    const result = anthropicExtractor.unmaskResponse(response, context);
+    expect((result.content[0] as { text: string }).text).toBe("Just a normal sentence.");
+  });
+});
+
+describe("PRESERVATION: Anthropic passthrough parity (Property 5)", () => {
+  test("applyMasked preserves unknown block fields when no masking applies (.passthrough())", () => {
+    const request = createRequest([
+      {
+        role: "user",
+        // unknown message-level field must survive
+        extra_message_field: "keep-me-too",
+        content: [
+          {
+            type: "text",
+            text: "No PII or secrets here",
+            cache_control: { type: "ephemeral" },
+            // biome-ignore lint/suspicious/noExplicitAny: testing passthrough of unknown fields
+          } as any,
+        ],
+        // biome-ignore lint/suspicious/noExplicitAny: testing passthrough of unknown fields
+      } as any,
+    ]);
+
+    // No masked spans -> nothing to change; unknown fields must be preserved.
+    const result = anthropicExtractor.applyMasked(request, []);
+
+    // biome-ignore lint/suspicious/noExplicitAny: testing passthrough of unknown fields
+    expect((result.messages[0] as any).extra_message_field).toBe("keep-me-too");
+    // biome-ignore lint/suspicious/noExplicitAny: testing passthrough of unknown fields
+    const block = (result.messages[0].content as any[])[0];
+    expect(block.text).toBe("No PII or secrets here");
+    expect(block.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  test("applyMasked with no masked spans leaves body content unchanged (baseline)", () => {
+    const request = createRequest([
+      { role: "user", content: "No PII, no secrets, no tools" },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Plain reply" }],
+      },
+    ]);
+
+    const result = anthropicExtractor.applyMasked(request, []);
+
+    expect(result.messages[0].content).toBe("No PII, no secrets, no tools");
+    expect((result.messages[1].content as Array<{ text: string }>)[0].text).toBe("Plain reply");
   });
 });

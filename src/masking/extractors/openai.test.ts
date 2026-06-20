@@ -339,6 +339,73 @@ describe("OpenAI Text Extractor", () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // BUG CONDITION EXPLORATION TEST (Property 1: Bug Condition)
+  // Encodes EXPECTED (fixed) behavior; EXPECTED TO FAIL on current code.
+  // Spec: .kiro/specs/pasteguard-tools-passthrough-fix (Cause 1, branch argsLeak)
+  // **Validates: Requirements 1.2, 1.4**
+  // ---------------------------------------------------------------------------
+  describe("BUG: tool_calls.arguments unmask leak (Property 1 / argsLeak)", () => {
+    test("restores placeholders inside tool_calls[].function.arguments (non-stream)", () => {
+      const response: OpenAIResponse = {
+        id: "test-id",
+        object: "chat.completion",
+        created: 123456,
+        model: "gpt-4",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: {
+                    name: "send_email",
+                    arguments:
+                      '{"to":"[[EMAIL_ADDRESS_1]]","subject":"Hi [[PERSON_1]]"}',
+                  },
+                },
+              ],
+              // biome-ignore lint/suspicious/noExplicitAny: tool_calls on response message
+            } as any,
+            finish_reason: "stop",
+          },
+        ],
+      };
+
+      const context: PlaceholderContext = {
+        mapping: {
+          "[[EMAIL_ADDRESS_1]]": "user@example.com",
+          "[[PERSON_1]]": "Alice",
+        },
+        reverseMapping: {
+          "user@example.com": "[[EMAIL_ADDRESS_1]]",
+          Alice: "[[PERSON_1]]",
+        },
+        counters: { EMAIL_ADDRESS: 1, PERSON: 1 },
+      };
+
+      const result = openaiExtractor.unmaskResponse(response, context);
+
+      // biome-ignore lint/suspicious/noExplicitAny: reading tool_calls in assertion
+      const toolCalls = (result.choices[0].message as any).tool_calls;
+      const args = toolCalls[0].function.arguments as string;
+
+      // EXPECTED (fixed) behavior: placeholders restored, valid JSON preserved
+      const parsed = JSON.parse(args);
+      expect(parsed.to).toBe("user@example.com");
+      expect(parsed.subject).toBe("Hi Alice");
+      expect(args).not.toContain("[[");
+      // Other tool_call fields preserved
+      expect(toolCalls[0].id).toBe("call_1");
+      expect(toolCalls[0].type).toBe("function");
+      expect(toolCalls[0].function.name).toBe("send_email");
+    });
+  });
+
   describe("unknown field preservation", () => {
     test("preserves name field on message through applyMasked", () => {
       const request = createRequest([
@@ -431,5 +498,113 @@ describe("OpenAI Text Extractor", () => {
       expect(part.text).toBe("Hello [[PERSON_1]]");
       expect(part.custom_field).toBe("preserved");
     });
+  });
+});
+
+
+// =============================================================================
+// PRESERVATION TESTS (Property 4 & 5: Preservation)
+// observation-first: lock in CURRENT (unfixed) behavior for non-tool, plain-text
+// inputs (isBugCondition == false). MUST PASS on unfixed code and stay green
+// after the fix.
+// Spec: .kiro/specs/pasteguard-tools-passthrough-fix
+// **Validates: Requirements 3.1, 3.3, 3.5**
+// =============================================================================
+
+describe("PRESERVATION: OpenAI text unmask parity (Property 4)", () => {
+  test("restores placeholders in plain string content (baseline)", () => {
+    const response: OpenAIResponse = {
+      id: "pres-1",
+      object: "chat.completion",
+      created: 1,
+      model: "gpt-4",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "Hi [[PERSON_1]], your email is [[EMAIL_ADDRESS_1]]",
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const context: PlaceholderContext = {
+      mapping: { "[[PERSON_1]]": "Alice", "[[EMAIL_ADDRESS_1]]": "alice@example.com" },
+      reverseMapping: { Alice: "[[PERSON_1]]", "alice@example.com": "[[EMAIL_ADDRESS_1]]" },
+      counters: { PERSON: 1, EMAIL_ADDRESS: 1 },
+    };
+
+    const result = openaiExtractor.unmaskResponse(response, context);
+
+    expect(result.choices[0].message.content).toBe("Hi Alice, your email is alice@example.com");
+    expect(JSON.stringify(result.choices)).not.toContain("[[");
+  });
+
+  test("restores placeholders inside text content-array parts (baseline)", () => {
+    const response: OpenAIResponse = {
+      id: "pres-2",
+      object: "chat.completion",
+      created: 1,
+      model: "gpt-4",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Hello [[PERSON_1]]" },
+              // biome-ignore lint/suspicious/noExplicitAny: structured content baseline
+            ] as any,
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const context: PlaceholderContext = {
+      mapping: { "[[PERSON_1]]": "Bob" },
+      reverseMapping: { Bob: "[[PERSON_1]]" },
+      counters: { PERSON: 1 },
+    };
+
+    const result = openaiExtractor.unmaskResponse(response, context);
+    const content = result.choices[0].message.content as Array<{ type: string; text?: string }>;
+    expect(content[0]).toEqual({ type: "text", text: "Hello Bob" });
+  });
+});
+
+describe("PRESERVATION: OpenAI passthrough parity (Property 5)", () => {
+  test("applyMasked preserves unknown message fields when no masking applies (.passthrough())", () => {
+    const request = createRequest([
+      {
+        role: "user",
+        content: "No PII or secrets here",
+        // unknown message-level fields must survive
+        name: "test_user",
+        extra_message_field: "keep-me-too",
+        // biome-ignore lint/suspicious/noExplicitAny: testing passthrough of unknown fields
+      } as any,
+    ]);
+
+    // No masked spans -> nothing to change; unknown fields must be preserved.
+    const result = openaiExtractor.applyMasked(request, []);
+
+    // biome-ignore lint/suspicious/noExplicitAny: testing passthrough of unknown fields
+    expect((result.messages[0] as any).name).toBe("test_user");
+    // biome-ignore lint/suspicious/noExplicitAny: testing passthrough of unknown fields
+    expect((result.messages[0] as any).extra_message_field).toBe("keep-me-too");
+    expect(result.messages[0].content).toBe("No PII or secrets here");
+  });
+
+  test("applyMasked with no masked spans leaves body content unchanged (baseline)", () => {
+    const request = createRequest([
+      { role: "system", content: "You are helpful" },
+      { role: "user", content: "No PII, no secrets, no tools" },
+    ]);
+
+    const result = openaiExtractor.applyMasked(request, []);
+
+    expect(result.messages[0].content).toBe("You are helpful");
+    expect(result.messages[1].content).toBe("No PII, no secrets, no tools");
   });
 });

@@ -40,6 +40,78 @@ function unmaskTextContent(
   return { text: processedText, piiBuffer: nextPiiBuffer, secretsBuffer: nextSecretsBuffer };
 }
 
+/** Per (choice index, tool_call index) streaming buffers for tool-call arguments. */
+type ToolCallArgBuffers = Map<string, { piiBuffer: string; secretsBuffer: string }>;
+
+interface StreamedToolCall {
+  index?: number;
+  function?: { arguments?: string };
+}
+
+/**
+ * Unmasks placeholders inside streamed `delta.tool_calls[].function.arguments`.
+ *
+ * Arguments arrive as JSON-string fragments across multiple chunks, so partial
+ * placeholders are buffered per (choice index, tool_call index) pair using the
+ * same streaming unmask mechanism as text content. The tool_calls structure
+ * (index, id, type, function.name) is preserved; only the `arguments` string
+ * fragments are transformed in place.
+ *
+ * Returns true when the parsed chunk carried any tool_calls (so the caller can
+ * forward the chunk even when it has no `delta.content`).
+ */
+function processToolCallDeltas(
+  parsed: { choices?: Array<{ index?: number; delta?: { tool_calls?: StreamedToolCall[] } }> },
+  buffers: ToolCallArgBuffers,
+  piiContext: PlaceholderContext | undefined,
+  config: MaskingConfig,
+  secretsContext?: PlaceholderContext,
+): boolean {
+  const choices = parsed.choices;
+  if (!Array.isArray(choices)) {
+    return false;
+  }
+
+  let found = false;
+
+  for (const choice of choices) {
+    const toolCalls = choice?.delta?.tool_calls;
+    if (!Array.isArray(toolCalls)) {
+      continue;
+    }
+
+    const choiceIndex = typeof choice.index === "number" ? choice.index : 0;
+
+    for (const toolCall of toolCalls) {
+      found = true;
+
+      const args = toolCall.function?.arguments;
+      if (typeof args !== "string" || args.length === 0) {
+        continue;
+      }
+
+      const toolCallIndex = typeof toolCall.index === "number" ? toolCall.index : 0;
+      const key = `${choiceIndex}:${toolCallIndex}`;
+      const prev = buffers.get(key) ?? { piiBuffer: "", secretsBuffer: "" };
+
+      const unmasked = unmaskTextContent(
+        args,
+        prev.piiBuffer,
+        piiContext,
+        config,
+        prev.secretsBuffer,
+        secretsContext,
+      );
+
+      buffers.set(key, { piiBuffer: unmasked.piiBuffer, secretsBuffer: unmasked.secretsBuffer });
+      // function is guaranteed defined because args came from it.
+      (toolCall.function as { arguments?: string }).arguments = unmasked.text;
+    }
+  }
+
+  return found;
+}
+
 /**
  * Creates a transform stream that unmasks SSE content
  *
@@ -58,6 +130,8 @@ export function createUnmaskingStream(
   const encoder = new TextEncoder();
   let piiBuffer = "";
   let secretsBuffer = "";
+  // Per (choice index, tool_call index) buffers for streamed tool-call arguments.
+  const toolCallBuffers: ToolCallArgBuffers = new Map();
 
   return new ReadableStream({
     async start(controller) {
@@ -85,6 +159,8 @@ export function createUnmaskingStream(
               flushed += secretsBuffer;
             }
 
+            // Only emit a trailing content chunk when there is actually buffered
+            // text content. Never emit an empty/erroneous content chunk.
             if (flushed) {
               const finalEvent = {
                 id: `flush-${Date.now()}`,
@@ -100,6 +176,51 @@ export function createUnmaskingStream(
               };
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(finalEvent)}\n\n`));
             }
+
+            // Flush any leftover tool-call argument buffers as tool_calls deltas,
+            // preserving the (choice index, tool_call index) structure.
+            for (const [key, buf] of toolCallBuffers) {
+              let argFlushed = "";
+
+              if (buf.piiBuffer && piiContext) {
+                argFlushed = flushMaskingBuffer(buf.piiBuffer, piiContext, config);
+              } else if (buf.piiBuffer) {
+                argFlushed = buf.piiBuffer;
+              }
+
+              if (buf.secretsBuffer && secretsContext) {
+                argFlushed += flushSecretsMaskingBuffer(buf.secretsBuffer, secretsContext);
+              } else if (buf.secretsBuffer) {
+                argFlushed += buf.secretsBuffer;
+              }
+
+              if (!argFlushed) {
+                continue;
+              }
+
+              const [choiceIndexStr, toolCallIndexStr] = key.split(":");
+              const finalEvent = {
+                id: `flush-${Date.now()}`,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                choices: [
+                  {
+                    index: Number(choiceIndexStr),
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: Number(toolCallIndexStr),
+                          function: { arguments: argFlushed },
+                        },
+                      ],
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(finalEvent)}\n\n`));
+            }
+
             controller.close();
             break;
           }
@@ -118,6 +239,13 @@ export function createUnmaskingStream(
 
               try {
                 const parsed = JSON.parse(data);
+                const hadToolCalls = processToolCallDeltas(
+                  parsed,
+                  toolCallBuffers,
+                  piiContext,
+                  config,
+                  secretsContext,
+                );
                 const content = parsed.choices?.[0]?.delta?.content;
 
                 if (typeof content === "string") {
@@ -164,6 +292,9 @@ export function createUnmaskingStream(
                     parsed.choices[0].delta.content = processedContent;
                     controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
                   }
+                } else if (hadToolCalls) {
+                  // tool_calls delta (no content): forward with unmasked arguments
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
                 } else {
                   // Pass through non-content events
                   controller.enqueue(encoder.encode(`data: ${data}\n\n`));

@@ -84,6 +84,7 @@ const LoggingSchema = z.object({
   database: z.string().default("./data/pasteguard.db"),
   retention_days: z.coerce.number().int().min(0).default(30),
   log_masked_content: z.boolean().default(true),
+  debug: z.boolean().default(false),
 });
 
 const DashboardAuthSchema = z.object({
