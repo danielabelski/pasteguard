@@ -22,43 +22,66 @@ export const envVarsDetector: PatternDetector = {
     const locations: SecretLocation[] = [];
 
     if (enabledTypes.has("ENV_PASSWORD")) {
+      // Shared positions so a single secret matched by multiple sub-patterns
+      // (e.g. tier-2 digit + tier-2b bareword) is not double counted.
+      const pwPositions = new Set<number>();
+
       // Tier 1: quoted values — highest confidence (hardcoded password literal)
       const pwQuotedPattern =
         /[A-Za-z_][A-Za-z0-9_]*(?:PASSWORD|_PWD)\s*[=:]\s*['"][^\s'"]{8,}['"]/gi;
-      detectPattern(text, pwQuotedPattern, "ENV_PASSWORD", matches, locations);
+      detectPattern(text, pwQuotedPattern, "ENV_PASSWORD", matches, locations, pwPositions);
 
       // Tier 2: unquoted values with digit/special char, excluding code expressions.
-      // Negative lookahead skips: identifiers followed by dot/paren/bracket/space,
+      // Negative lookahead skips: identifiers followed by dot/paren/bracket,
       // language keywords (None, null, undefined, True, False, true, false),
       // and common code prefixes (os., process., self., kwargs, settings., config., env.)
       const pwUnquotedPattern =
-        /[A-Za-z_][A-Za-z0-9_]*(?:PASSWORD|_PWD)\s*[=:]\s*(?![A-Za-z_]\w*[\s.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.)(?=\S*[\d!@#$%^&*+\-/\\])\S{8,}/gi;
-      detectPattern(text, pwUnquotedPattern, "ENV_PASSWORD", matches, locations);
+        /[A-Za-z_][A-Za-z0-9_]*(?:PASSWORD|_PWD)\s*[=:]\s*(?![A-Za-z_]\w*[.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.)(?=\S*[\d!@#$%^&*+\-/\\])\S{8,}/gi;
+      detectPattern(text, pwUnquotedPattern, "ENV_PASSWORD", matches, locations, pwPositions);
+
+      // Tier 2b: no-digit lone-bareword unquoted values for explicit secret-named vars
+      // (e.g. ADMIN_PWD=secretadminpwd). Keeps code-expression protection: excludes when
+      // the value is followed by ./([, is a language keyword, starts with a known code
+      // prefix, or is immediately followed by a continuation keyword (or/and/is/not/if/else)
+      // — which protects code like
+      // `basic_auth_password=basic_auth_password or base_settings.basic_auth_password`.
+      const pwBarewordPattern =
+        /[A-Za-z_][A-Za-z0-9_]*(?:PASSWORD|_PWD)\s*[=:]\s*(?![A-Za-z_]\w*[.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.)[A-Za-z_][A-Za-z0-9_]{7,}(?![\w.(\[])(?!\s+(?:or|and|is|not|if|else)\b)/gi;
+      detectPattern(text, pwBarewordPattern, "ENV_PASSWORD", matches, locations, pwPositions);
 
       // Inline password=... or pwd=... assignments (lowercase, not env-style)
       // Tier 1: quoted
       const pwInlineQuotedPattern =
         /(?:(?<=^|[\s,;])(?:password|passwd|pwd))\s*(?:[:=]\s*|is\s+)['"][^\s'"]{8,}['"]/gi;
-      detectPattern(text, pwInlineQuotedPattern, "ENV_PASSWORD", matches, locations);
+      detectPattern(text, pwInlineQuotedPattern, "ENV_PASSWORD", matches, locations, pwPositions);
 
       // Tier 2: unquoted with digit/special, excluding code expressions
       const pwInlineUnquotedPattern =
-        /(?:(?<=^|[\s,;])(?:password|passwd|pwd))\s*(?:[:=]\s*)(?![A-Za-z_]\w*[\s.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.)(?=\S*[\d!@#$%^&*+\-/\\])\S{8,}/gi;
-      detectPattern(text, pwInlineUnquotedPattern, "ENV_PASSWORD", matches, locations);
+        /(?:(?<=^|[\s,;])(?:password|passwd|pwd))\s*(?:[:=]\s*)(?![A-Za-z_]\w*[.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.)(?=\S*[\d!@#$%^&*+\-/\\])\S{8,}/gi;
+      detectPattern(text, pwInlineUnquotedPattern, "ENV_PASSWORD", matches, locations, pwPositions);
     }
 
     // Environment variable secret patterns: _SECRET suffix with value (8+ chars)
     // Same two-tier approach as ENV_PASSWORD
     if (enabledTypes.has("ENV_SECRET")) {
+      const secretPositions = new Set<number>();
+
       // Tier 1: quoted
       const secretQuotedPattern =
         /[A-Za-z_][A-Za-z0-9_]*_SECRET\s*[=:]\s*['"][^\s'"]{8,}['"]/gi;
-      detectPattern(text, secretQuotedPattern, "ENV_SECRET", matches, locations);
+      detectPattern(text, secretQuotedPattern, "ENV_SECRET", matches, locations, secretPositions);
 
       // Tier 2: unquoted with digit/special, excluding code expressions
       const secretUnquotedPattern =
-        /[A-Za-z_][A-Za-z0-9_]*_SECRET\s*[=:]\s*(?![A-Za-z_]\w*[\s.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.)(?=\S*[\d!@#$%^&*+\-/\\])\S{8,}/gi;
-      detectPattern(text, secretUnquotedPattern, "ENV_SECRET", matches, locations);
+        /[A-Za-z_][A-Za-z0-9_]*_SECRET\s*[=:]\s*(?![A-Za-z_]\w*[.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.)(?=\S*[\d!@#$%^&*+\-/\\])\S{8,}/gi;
+      detectPattern(text, secretUnquotedPattern, "ENV_SECRET", matches, locations, secretPositions);
+
+      // Tier 2b: no-digit lone-bareword unquoted values for explicit _SECRET vars
+      // (e.g. app_secret: production_secret_key_here). Same code-expression protection
+      // as the ENV_PASSWORD tier-2b (keywords, code prefixes, ./([, continuation keywords).
+      const secretBarewordPattern =
+        /[A-Za-z_][A-Za-z0-9_]*_SECRET\s*[=:]\s*(?![A-Za-z_]\w*[.(\[]|None|null|undefined|True|False|true|false|os\.|process\.|self\.|kwargs|settings\.|config\.|env\.)[A-Za-z_][A-Za-z0-9_]{7,}(?![\w.(\[])(?!\s+(?:or|and|is|not|if|else)\b)/gi;
+      detectPattern(text, secretBarewordPattern, "ENV_SECRET", matches, locations, secretPositions);
     }
 
     // Connection strings with embedded passwords (user:password@host format)

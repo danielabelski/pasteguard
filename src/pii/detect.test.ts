@@ -1,9 +1,26 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { getConfig } from "../config";
 import { openaiExtractor } from "../masking/extractors/openai";
 import type { OpenAIMessage, OpenAIRequest } from "../providers/openai/types";
 import { filterWhitelistedEntities, PIIDetector } from "./detect";
 
 const originalFetch = globalThis.fetch;
+
+/**
+ * Runs `fn` with PII scan_roles overridden to cover all message roles, then restores
+ * the original value. This keeps detector-logic tests independent of the production
+ * config.yaml (which may restrict scan_roles to e.g. [user, tool]).
+ */
+async function withAllScanRoles<T>(fn: () => Promise<T>): Promise<T> {
+  const config = getConfig();
+  const original = config.pii_detection.scan_roles;
+  config.pii_detection.scan_roles = ["system", "user", "assistant", "tool"];
+  try {
+    return await fn();
+  } finally {
+    config.pii_detection.scan_roles = original;
+  }
+}
 
 function mockPresidio(
   responses: Record<
@@ -65,7 +82,9 @@ describe("PIIDetector", () => {
         { role: "assistant", content: "assistant-pii here" },
       ]);
 
-      const result = await detector.analyzeRequest(request, openaiExtractor);
+      const result = await withAllScanRoles(() =>
+        detector.analyzeRequest(request, openaiExtractor),
+      );
 
       expect(result.hasPII).toBe(true);
       expect(result.spanEntities).toHaveLength(3);
@@ -85,7 +104,9 @@ describe("PIIDetector", () => {
         { role: "user", content: "Extract the data into JSON" },
       ]);
 
-      const result = await detector.analyzeRequest(request, openaiExtractor);
+      const result = await withAllScanRoles(() =>
+        detector.analyzeRequest(request, openaiExtractor),
+      );
 
       expect(result.hasPII).toBe(true);
       expect(result.spanEntities[0]).toHaveLength(1);
