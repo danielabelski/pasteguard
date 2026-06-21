@@ -74,3 +74,9 @@ logging:
 
 dashboard:
   enabled: true
+
+# Per-model context windows surfaced via /v1/models as `context_length`.
+# Id-exact map of model id -> context window. String form "id=number,id=number"
+# env-substituted.
+# Example: MODEL_CONTEXT_WINDOWS=minimax/MiniMax-M3=204800,gpt-4o=128000
+model_context_windows: "${MODEL_CONTEXT_WINDOWS:-}"

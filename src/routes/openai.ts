@@ -33,6 +33,7 @@ import { logRequest } from "../services/logger";
 import { detectPII, maskPII, type PIIDetectResult } from "../services/pii";
 import { processSecretsRequest, type SecretsProcessResult } from "../services/secrets";
 import { extractTextContent } from "../utils/content";
+import { enrichModelsResponse } from "./models-enrich";
 import {
   createLogData,
   errorFormats,
@@ -145,6 +146,81 @@ openaiRoutes.post(
     });
   },
 );
+
+/**
+ * GET /v1/models
+ *
+ * Proxies to the upstream models list (same target as the wildcard), then
+ * enriches each model object with a `context_length` field (resolved from the
+ * configured `model_context_windows` map) before returning. Registered BEFORE
+ * the wildcard so it takes precedence.
+ *
+ * Fallbacks that return the upstream payload untouched:
+ *   - upstream fetch throws  -> 502
+ *   - non-2xx status         -> original body + status
+ *   - non-JSON content-type  -> original body + status
+ *   - JSON parse failure     -> original body + status
+ * On the happy path the parsed body is enriched via {@link enrichModelsResponse}
+ * (a no-op for ids that match nothing) and returned with the same status.
+ */
+openaiRoutes.get("/v1/models", async (c) => {
+  const config = getConfig();
+  const { baseUrl } = getOpenAIInfo(config.providers.openai);
+  const path = c.req.path.replace(/^\/openai\/v1/, "");
+  const query = c.req.url.includes("?") ? c.req.url.slice(c.req.url.indexOf("?")) : "";
+
+  // Forward the same headers the wildcard would (client auth/headers), minus host.
+  const headers: Record<string, string> = { ...c.req.header() };
+  delete headers.host;
+  headers["X-Forwarded-Host"] = c.req.header("host") ?? "";
+  // Fall back to configured provider key if the client sent no auth.
+  if (!headers.Authorization && !headers.authorization && config.providers.openai.api_key) {
+    headers.Authorization = `Bearer ${config.providers.openai.api_key}`;
+  }
+
+  let upstream: Response;
+  let text: string;
+  try {
+    upstream = await fetch(`${baseUrl}${path}${query}`, { method: "GET", headers });
+    text = await upstream.text();
+  } catch (error) {
+    return c.json(
+      errorFormats.openai.error(
+        `Failed to fetch models: ${error instanceof Error ? error.message : String(error)}`,
+        "server_error",
+        "upstream_error",
+      ),
+      502,
+    );
+  }
+
+  const contentType = upstream.headers.get("content-type") ?? "";
+
+  // Fallback: non-2xx or non-JSON -> return the original upstream body untouched.
+  if (!upstream.ok || !contentType.toLowerCase().includes("json")) {
+    return new Response(text, {
+      status: upstream.status,
+      headers: { "Content-Type": contentType || "application/json" },
+    });
+  }
+
+  // Parse + enrich. On parse failure, fall back to the original body untouched.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return new Response(text, {
+      status: upstream.status,
+      headers: { "Content-Type": contentType },
+    });
+  }
+
+  const enriched = enrichModelsResponse(parsed, config.model_context_windows);
+  return new Response(JSON.stringify(enriched), {
+    status: upstream.status,
+    headers: { "Content-Type": "application/json" },
+  });
+});
 
 /**
  * Wildcard proxy for /models, /embeddings, /audio/*, /images/*, etc.

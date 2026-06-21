@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { SUPPORTED_LANGUAGES } from "./constants/languages";
+import { parseContextOverridesEnv } from "./routes/models-enrich";
 
 // Schema definitions
 
@@ -74,6 +75,37 @@ const PIIDetectionSchema = z.object({
   scan_roles: z.array(z.string()).optional(),
 });
 
+/**
+ * Resolved model context-window map: model id -> context length (integer).
+ */
+export type ModelContextWindows = Record<string, number>;
+
+/**
+ * Context windows config: accepts a YAML object map `{ "<id>": <number> }` OR a
+ * single comma-separated string of `<id>=<number>` pairs (the latter is how it
+ * arrives from an env var via `${VAR}` substitution). Both are normalized into
+ * `Record<string, number>` (string form via {@link parseContextOverridesEnv}).
+ * These are id-exact context windows surfaced via `/v1/models` as
+ * `context_length`. Empty/absent -> {}.
+ */
+const ModelContextWindowsSchema = z
+  .union([z.record(z.unknown()), z.string()])
+  .optional()
+  .transform((val) => {
+    if (val === undefined || val === null) return {} as Record<string, number>;
+    if (typeof val === "string") return parseContextOverridesEnv(val);
+    // Object map: keep finite numeric values with non-empty (trimmed) keys.
+    const out: Record<string, number> = {};
+    for (const [rawKey, value] of Object.entries(val)) {
+      const key = rawKey.trim();
+      if (key === "") continue;
+      const num = Number(value);
+      if (!Number.isFinite(num)) continue;
+      out[key] = num;
+    }
+    return out;
+  });
+
 const ServerSchema = z.object({
   port: z.coerce.number().int().min(1).max(65535).default(3000),
   host: z.string().default("0.0.0.0"),
@@ -143,6 +175,8 @@ const ConfigSchema = z
     logging: LoggingSchema.default({}),
     dashboard: DashboardSchema.default({}),
     secrets_detection: SecretsDetectionSchema.default({}),
+    // Optional: model id -> context window. Object map or "id=number,..." string.
+    model_context_windows: ModelContextWindowsSchema,
   })
   .refine(
     (config) => {
