@@ -76,7 +76,17 @@ dashboard:
   enabled: true
 
 # Per-model context windows surfaced via /v1/models as `context_length`.
-# Id-exact map of model id -> context window. String form "id=number,id=number"
-# env-substituted.
-# Example: MODEL_CONTEXT_WINDOWS=minimax/MiniMax-M3=204800,gpt-4o=128000
-model_context_windows: "${MODEL_CONTEXT_WINDOWS:-}"
+# Id-exact map of model id -> context window. Accepts either a YAML object map
+# (as below) OR a comma-separated "id=number,id=number" string (handy for env
+# substitution, e.g. model_context_windows: "${MODEL_CONTEXT_WINDOWS:-}").
+# Only ids present here are enriched; upstream-provided context_length is never
+# overwritten. Standard, public context sizes — safe to ship as defaults.
+model_context_windows:
+  "cx/gpt-5.4": 272000
+  "cx/gpt-5.4-review": 272000
+  "cx/gpt-5.4-mini": 400000
+  "cx/gpt-5.4-mini-review": 400000
+  "cx/gpt-5.5": 1050000
+  "cx/gpt-5.5-review": 1050000
+  "minimax/MiniMax-M3": 1000000
+  "ide2llm/MiniMax M3": 1000000
