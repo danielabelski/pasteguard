@@ -93,3 +93,107 @@ export function sanitizeToolUseIds(request: AnthropicRequest): AnthropicRequest 
     }),
   };
 }
+
+/**
+ * Removes "thinking" content blocks whose thinking text is empty or whitespace-only.
+ *
+ * Anthropic rejects requests where a thinking block contains only whitespace with
+ * `400 invalid_request_error: "each thinking block must contain non-whitespace
+ * thinking"`. Such blocks can appear in replayed conversation history when an upstream
+ * router converts a non-Claude fallback response into Claude format and emits an empty
+ * reasoning block. This normalization strips those blocks so the request validates.
+ *
+ * - Only "thinking" blocks are inspected (text lives in `block.thinking`).
+ * - "redacted_thinking" blocks are always KEPT: their `data` is opaque (no readable
+ *   text), so they cannot be classified as empty and are valid as-is.
+ * - Guard: if removing empty thinking block(s) would leave a message's content array
+ *   empty, the message is left untouched (a fully-empty content array is itself
+ *   invalid). In practice assistant turns carrying a whitespace thinking block also
+ *   contain text/tool_use blocks, so removal is safe.
+ * - Only array content is processed; string content and other blocks/order are preserved.
+ */
+export function stripEmptyThinkingBlocks(request: AnthropicRequest): AnthropicRequest {
+  if (!Array.isArray(request.messages)) return request;
+
+  let changed = false;
+
+  const messages = request.messages.map((msg) => {
+    if (!Array.isArray(msg.content)) return msg;
+
+    const filtered = msg.content.filter((block: Record<string, unknown>) => {
+      if (block.type === "thinking") {
+        const text = typeof block.thinking === "string" ? block.thinking : "";
+        // Drop only when the thinking text is empty or whitespace-only.
+        return text.trim().length > 0;
+      }
+      // redacted_thinking and all other block types are always kept.
+      return true;
+    });
+
+    // Guard: never empty out a message's content array.
+    if (filtered.length === 0 || filtered.length === msg.content.length) return msg;
+
+    changed = true;
+    return { ...msg, content: filtered };
+  });
+
+  if (!changed) return request;
+
+  return { ...request, messages };
+}
+
+/**
+ * Removes ALL "thinking" and "redacted_thinking" content blocks from every message.
+ *
+ * Anthropic validates the `signature` of EVERY thinking block in the request and
+ * rejects foreign signatures with `400 invalid_request_error: "messages.N.content.M:
+ * Invalid \`signature\` in \`thinking\` block"`. This happens when replayed conversation
+ * history contains assistant thinking blocks authored by NON-Claude fallback providers
+ * (e.g. gpt-5.4/kimi in a combo route) — their signatures cannot be re-signed for
+ * Anthropic. Stripping every thinking/redacted_thinking block before forwarding is the
+ * only safe fix. It also supersedes stripEmptyThinkingBlocks: removing all thinking
+ * blocks necessarily removes the whitespace-only ones too.
+ *
+ * - Only array content is processed; string content and non-thinking blocks (text,
+ *   tool_use, tool_result, image, etc.) are preserved with original order.
+ * - If a message's content array becomes EMPTY after removal, the whole message is
+ *   dropped from the messages array (empty content is invalid; a thinking-only turn
+ *   carries no other payload, so dropping is safe).
+ * - Returns the same request reference when there are no thinking/redacted_thinking
+ *   blocks anywhere (no-op fast path).
+ */
+export function stripThinkingBlocks(request: AnthropicRequest): AnthropicRequest {
+  if (!Array.isArray(request.messages)) return request;
+
+  const isThinking = (block: Record<string, unknown>): boolean =>
+    block.type === "thinking" || block.type === "redacted_thinking";
+
+  let changed = false;
+  const messages = [];
+
+  for (const msg of request.messages) {
+    if (!Array.isArray(msg.content)) {
+      messages.push(msg);
+      continue;
+    }
+
+    const filtered = msg.content.filter((block: Record<string, unknown>) => !isThinking(block));
+
+    if (filtered.length === msg.content.length) {
+      // No thinking blocks in this message — keep as-is.
+      messages.push(msg);
+      continue;
+    }
+
+    changed = true;
+
+    // Drop the entire message if removing thinking blocks left it empty.
+    if (filtered.length === 0) continue;
+
+    messages.push({ ...msg, content: filtered });
+  }
+
+  if (!changed) return request;
+
+  return { ...request, messages };
+}

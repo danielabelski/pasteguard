@@ -32,7 +32,7 @@ import { unmaskSecretsResponse } from "../secrets/mask";
 import { logRequest } from "../services/logger";
 import { detectPII, maskPII, type PIIDetectResult } from "../services/pii";
 import { processSecretsRequest, type SecretsProcessResult } from "../services/secrets";
-import { hoistSystemMessages, sanitizeToolUseIds } from "./normalize";
+import { hoistSystemMessages, sanitizeToolUseIds, stripThinkingBlocks } from "./normalize";
 import {
   createLogData,
   errorFormats,
@@ -69,11 +69,15 @@ anthropicRoutes.post(
     const config = getConfig();
 
     // Hoist any role:"system" messages from the messages array into the top-level
-    // system field, then sanitize tool_use.id / tool_result.tool_use_id to Anthropic's
-    // required id pattern. Both are pure normalizations (see routes/normalize.ts) that
-    // prevent 400 errors from the upstream API. Runtime behavior is unchanged.
+    // system field, sanitize tool_use.id / tool_result.tool_use_id to Anthropic's
+    // required id pattern, then strip ALL thinking/redacted_thinking blocks that can be
+    // replayed from non-Claude fallback reasoning (their signatures are foreign and
+    // rejected by Anthropic; this also covers whitespace-only blocks). All are pure
+    // normalizations (see routes/normalize.ts) that prevent 400 errors from the upstream
+    // API. Runtime behavior is unchanged.
     request = hoistSystemMessages(request);
     request = sanitizeToolUseIds(request);
+    request = stripThinkingBlocks(request);
 
     // Route mode requires local provider
     if (config.mode === "route" && !config.local) {

@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { AnthropicRequest } from "../providers/anthropic/types";
-import { hoistSystemMessages, sanitizeToolUseIds } from "./normalize";
+import {
+  hoistSystemMessages,
+  sanitizeToolUseIds,
+  stripEmptyThinkingBlocks,
+  stripThinkingBlocks,
+} from "./normalize";
 
 // biome-ignore lint/suspicious/noExplicitAny: tests construct partial requests
 function req(partial: any): AnthropicRequest {
@@ -138,5 +143,249 @@ describe("sanitizeToolUseIds", () => {
 
     const result = sanitizeToolUseIds(input);
     expect(result.messages[0].content).toBe("plain text content");
+  });
+});
+
+describe("stripEmptyThinkingBlocks", () => {
+  test("removes a whitespace-only thinking block but keeps the following text block and order", () => {
+    const result = stripEmptyThinkingBlocks(
+      req({
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "\n  " },
+              { type: "text", text: "the answer" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const content = result.messages[0].content as Array<Record<string, unknown>>;
+    expect(content).toHaveLength(1);
+    expect(content[0].type).toBe("text");
+    expect(content[0].text).toBe("the answer");
+  });
+
+  test("removes an empty-string thinking block", () => {
+    const result = stripEmptyThinkingBlocks(
+      req({
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "" },
+              { type: "text", text: "hello" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const content = result.messages[0].content as Array<Record<string, unknown>>;
+    expect(content).toHaveLength(1);
+    expect(content[0].type).toBe("text");
+  });
+
+  test("keeps a non-whitespace thinking block unchanged", () => {
+    const input = req({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "let me reason about this" },
+            { type: "text", text: "done" },
+          ],
+        },
+      ],
+    });
+
+    const result = stripEmptyThinkingBlocks(input);
+    expect(result).toBe(input); // same reference — no change
+    const content = result.messages[0].content as Array<Record<string, unknown>>;
+    expect(content).toHaveLength(2);
+    expect(content[0].thinking).toBe("let me reason about this");
+  });
+
+  test("keeps a redacted_thinking block unchanged (opaque data, treated as valid)", () => {
+    const input = req({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "redacted_thinking", data: "EncryptedOpaqueBlob==" },
+            { type: "text", text: "answer" },
+          ],
+        },
+      ],
+    });
+
+    const result = stripEmptyThinkingBlocks(input);
+    expect(result).toBe(input); // same reference — no change
+    const content = result.messages[0].content as Array<Record<string, unknown>>;
+    expect(content).toHaveLength(2);
+    expect(content[0].type).toBe("redacted_thinking");
+  });
+
+  test("does not empty a message whose only block is a whitespace thinking block (guard)", () => {
+    const input = req({
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "   " }],
+        },
+      ],
+    });
+
+    const result = stripEmptyThinkingBlocks(input);
+    const content = result.messages[0].content as Array<Record<string, unknown>>;
+    expect(content).toHaveLength(1);
+    expect(content[0].type).toBe("thinking");
+  });
+
+  test("leaves string-content messages untouched", () => {
+    const input = req({
+      messages: [{ role: "user", content: "plain text content" }],
+    });
+
+    const result = stripEmptyThinkingBlocks(input);
+    expect(result).toBe(input); // same reference — no change
+    expect(result.messages[0].content).toBe("plain text content");
+  });
+});
+
+describe("stripThinkingBlocks", () => {
+  test("removes a thinking block (with signature) but keeps the text block and order", () => {
+    const result = stripThinkingBlocks(
+      req({
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "let me reason", signature: "foreign-sig-abc" },
+              { type: "text", text: "the answer" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const content = result.messages[0].content as Array<Record<string, unknown>>;
+    expect(content).toHaveLength(1);
+    expect(content[0].type).toBe("text");
+    expect(content[0].text).toBe("the answer");
+  });
+
+  test("removes redacted_thinking blocks", () => {
+    const result = stripThinkingBlocks(
+      req({
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "redacted_thinking", data: "EncryptedOpaqueBlob==" },
+              { type: "text", text: "answer" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const content = result.messages[0].content as Array<Record<string, unknown>>;
+    expect(content).toHaveLength(1);
+    expect(content[0].type).toBe("text");
+  });
+
+  test("removes thinking blocks regardless of signature validity or content", () => {
+    const result = stripThinkingBlocks(
+      req({
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "non-whitespace reasoning", signature: "invalid" },
+              { type: "thinking", thinking: "" },
+              { type: "redacted_thinking", data: "blob" },
+              { type: "text", text: "final" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const content = result.messages[0].content as Array<Record<string, unknown>>;
+    expect(content).toHaveLength(1);
+    expect(content[0].type).toBe("text");
+    expect(content[0].text).toBe("final");
+  });
+
+  test("drops a thinking-only message and preserves other messages/order", () => {
+    const result = stripThinkingBlocks(
+      req({
+        messages: [
+          { role: "user", content: "first" },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "internal reasoning", signature: "foreign" },
+            ],
+          },
+          { role: "user", content: "third" },
+        ],
+      }),
+    );
+
+    expect(result.messages).toHaveLength(2);
+    expect(result.messages[0].role).toBe("user");
+    expect(result.messages[0].content).toBe("first");
+    expect(result.messages[1].role).toBe("user");
+    expect(result.messages[1].content).toBe("third");
+  });
+
+  test("leaves string content and thinking-free messages untouched (same reference)", () => {
+    const input = req({
+      messages: [
+        { role: "user", content: "plain text content" },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "no thinking here" }],
+        },
+      ],
+    });
+
+    const result = stripThinkingBlocks(input);
+    expect(result).toBe(input); // same reference — no change
+    expect(result.messages[0].content).toBe("plain text content");
+  });
+
+  test("preserves tool_use and tool_result blocks (binding intact)", () => {
+    const result = stripThinkingBlocks(
+      req({
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "deciding to call tool", signature: "foreign" },
+              { type: "tool_use", id: "call_1", name: "search", input: {} },
+            ],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }],
+          },
+        ],
+      }),
+    );
+
+    const assistant = result.messages[0].content as Array<Record<string, unknown>>;
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].type).toBe("tool_use");
+    expect(assistant[0].id).toBe("call_1");
+
+    const user = result.messages[1].content as Array<Record<string, unknown>>;
+    expect(user).toHaveLength(1);
+    expect(user[0].type).toBe("tool_result");
+    expect(user[0].tool_use_id).toBe("call_1");
   });
 });
