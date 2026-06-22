@@ -120,7 +120,7 @@ export function createUnmaskingStream(
                 const parsed = JSON.parse(data);
                 const content = parsed.choices?.[0]?.delta?.content;
 
-                if (typeof content === "string") {
+                if (typeof content === "string" && content !== "") {
                   const unmasked = unmaskTextContent(
                     content,
                     piiBuffer,
