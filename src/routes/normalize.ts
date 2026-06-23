@@ -197,3 +197,86 @@ export function stripThinkingBlocks(request: AnthropicRequest): AnthropicRequest
 
   return { ...request, messages };
 }
+
+/**
+ * Regex lookaround pattern (`(?=`, `(?!`, `(?<=`, `(?<!`) — used to detect
+ * incompatible patterns that OpenAI/Codex rejects with 400 "Invalid JSON schema:
+ * regex lookaround is not supported".
+ */
+const LOOKAROUND_RE = /\(\?[=!<]/;
+
+/**
+ * Recursively walks a JSON Schema object and removes any `pattern` field whose
+ * value contains regex lookaround. Other `pattern` values are preserved.
+ *
+ * Handles nested `properties`, `items`, `allOf`/`anyOf`/`oneOf`, `additionalProperties`,
+ * `$defs`/`definitions`, and `prefixItems`.
+ */
+function stripPatternsDeep(schema: unknown): unknown {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+    if (Array.isArray(schema)) return schema.map(stripPatternsDeep);
+    return schema;
+  }
+
+  const obj = schema as Record<string, unknown>;
+  let changed = false;
+  const result: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (key === "pattern" && typeof value === "string" && LOOKAROUND_RE.test(value)) {
+      // Drop this pattern field entirely
+      changed = true;
+      continue;
+    }
+    // Recurse into sub-schemas (objects and arrays that can contain nested schemas)
+    if (
+      (key === "allOf" || key === "anyOf" || key === "oneOf" || key === "prefixItems") &&
+      Array.isArray(value)
+    ) {
+      const stripped = value.map(stripPatternsDeep);
+      result[key] = stripped;
+      if (stripped.some((v, i) => v !== value[i])) changed = true;
+    } else if (value !== null && typeof value === "object") {
+      // Any nested object may be or contain a sub-schema — recurse
+      const stripped = stripPatternsDeep(value);
+      result[key] = stripped;
+      if (stripped !== value) changed = true;
+    } else {
+      result[key] = value;
+    }
+  }
+
+  return changed ? result : obj;
+}
+
+/**
+ * Strips regex `pattern` fields containing lookaround assertions from all tool
+ * `input_schema` definitions in the request.
+ *
+ * OpenAI/Codex rejects JSON Schemas that use regex lookaround (`(?=`, `(?!`,
+ * `(?<=`, `(?<!)`) with `400 Invalid JSON schema: regex lookaround is not
+ * supported`. Since `pattern` is an optional validation hint (not required for
+ * model behavior), removing it is safe and prevents combo-fallback failures on
+ * codex/openai providers.
+ *
+ * Only processes `request.tools[].input_schema`; messages and other fields are
+ * untouched. Returns the same reference if no patterns needed stripping (no-op).
+ */
+export function stripLookaroundPatterns(request: AnthropicRequest): AnthropicRequest {
+  if (!Array.isArray(request.tools) || request.tools.length === 0) return request;
+
+  let changed = false;
+  const tools = request.tools.map((tool: Record<string, unknown>) => {
+    const schema = tool.input_schema;
+    if (!schema || typeof schema !== "object") return tool;
+
+    const stripped = stripPatternsDeep(schema);
+    if (stripped === schema) return tool;
+
+    changed = true;
+    return { ...tool, input_schema: stripped };
+  });
+
+  if (!changed) return request;
+  return { ...request, tools };
+}

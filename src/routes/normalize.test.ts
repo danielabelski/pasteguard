@@ -4,6 +4,7 @@ import {
   hoistSystemMessages,
   sanitizeToolUseIds,
   stripEmptyThinkingBlocks,
+  stripLookaroundPatterns,
   stripThinkingBlocks,
 } from "./normalize";
 
@@ -387,5 +388,58 @@ describe("stripThinkingBlocks", () => {
     expect(user).toHaveLength(1);
     expect(user[0].type).toBe("tool_result");
     expect(user[0].tool_use_id).toBe("call_1");
+  });
+});
+
+
+// =============================================================================
+// stripLookaroundPatterns
+// =============================================================================
+
+describe("stripLookaroundPatterns", () => {
+  const base: any = { model: "test", max_tokens: 100, messages: [{ role: "user", content: "hi" }] };
+
+  test("removes pattern with positive lookahead (?=...)", () => {
+    const req = { ...base, tools: [{ name: "t1", input_schema: { type: "object", properties: { x: { type: "string", pattern: "^(?=.*[A-Z]).{8,}$" } } } }] };
+    const out = stripLookaroundPatterns(req as AnthropicRequest);
+    expect((out.tools![0] as any).input_schema.properties.x).not.toHaveProperty("pattern");
+    expect((out.tools![0] as any).input_schema.properties.x.type).toBe("string");
+  });
+
+  test("removes pattern with negative lookahead (?!...)", () => {
+    const req = { ...base, tools: [{ name: "t1", input_schema: { type: "object", properties: { x: { type: "string", pattern: "(?!bad).*" } } } }] };
+    const out = stripLookaroundPatterns(req as AnthropicRequest);
+    expect((out.tools![0] as any).input_schema.properties.x).not.toHaveProperty("pattern");
+  });
+
+  test("removes pattern with lookbehind (?<=...) and (?<!...)", () => {
+    const req = { ...base, tools: [{ name: "t1", input_schema: { type: "object", properties: { a: { type: "string", pattern: "(?<=@).+" }, b: { type: "string", pattern: "(?<!\\d)abc" } } } }] };
+    const out = stripLookaroundPatterns(req as AnthropicRequest);
+    expect((out.tools![0] as any).input_schema.properties.a).not.toHaveProperty("pattern");
+    expect((out.tools![0] as any).input_schema.properties.b).not.toHaveProperty("pattern");
+  });
+
+  test("preserves pattern without lookaround", () => {
+    const req = { ...base, tools: [{ name: "t1", input_schema: { type: "object", properties: { x: { type: "string", pattern: "^[a-z]+$" } } } }] };
+    const out = stripLookaroundPatterns(req as AnthropicRequest);
+    expect((out.tools![0] as any).input_schema.properties.x.pattern).toBe("^[a-z]+$");
+  });
+
+  test("handles nested schemas (items, allOf)", () => {
+    const req = { ...base, tools: [{ name: "t1", input_schema: { type: "object", properties: { arr: { type: "array", items: { type: "string", pattern: "(?=x)y" } } } } }] };
+    const out = stripLookaroundPatterns(req as AnthropicRequest);
+    expect((out.tools![0] as any).input_schema.properties.arr.items).not.toHaveProperty("pattern");
+  });
+
+  test("returns same reference when no tools", () => {
+    const req = { ...base };
+    const out = stripLookaroundPatterns(req as AnthropicRequest);
+    expect(out).toBe(req);
+  });
+
+  test("returns same reference when no patterns need stripping", () => {
+    const req = { ...base, tools: [{ name: "t1", input_schema: { type: "object", properties: { x: { type: "string" } } } }] };
+    const out = stripLookaroundPatterns(req as AnthropicRequest);
+    expect(out).toBe(req);
   });
 });

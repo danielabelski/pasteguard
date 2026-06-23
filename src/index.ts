@@ -90,6 +90,7 @@ export default {
   port,
   hostname: host,
   fetch: app.fetch,
+  idleTimeout: 255, // seconds; max allowed by Bun (default 10s is too short for LLM streaming)
 };
 
 // Startup validation

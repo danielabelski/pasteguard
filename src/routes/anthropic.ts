@@ -32,7 +32,7 @@ import { unmaskSecretsResponse } from "../secrets/mask";
 import { logRequest } from "../services/logger";
 import { detectPII, maskPII, type PIIDetectResult } from "../services/pii";
 import { processSecretsRequest, type SecretsProcessResult } from "../services/secrets";
-import { hoistSystemMessages, sanitizeToolUseIds, stripThinkingBlocks } from "./normalize";
+import { hoistSystemMessages, sanitizeToolUseIds, stripThinkingBlocks, stripLookaroundPatterns } from "./normalize";
 import {
   createLogData,
   errorFormats,
@@ -78,6 +78,7 @@ anthropicRoutes.post(
     request = hoistSystemMessages(request);
     request = sanitizeToolUseIds(request);
     request = stripThinkingBlocks(request);
+    request = stripLookaroundPatterns(request);
 
     // Route mode requires local provider
     if (config.mode === "route" && !config.local) {
