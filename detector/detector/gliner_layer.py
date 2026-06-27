@@ -11,9 +11,13 @@ from __future__ import annotations
 import os
 import re
 import threading
+from functools import lru_cache
 from typing import Any
 
 from .entities import LOCATION, PERSON, Span
+
+# Size of the LRU cache, in units of WINDOW_SIZE input to the model
+MODEL_INFERENCE_CACHE_SIZE = 4096
 
 DEFAULT_MODEL = "urchade/gliner_multi_pii-v1"
 
@@ -104,6 +108,11 @@ def load_model() -> None:
         _model = GLiNER.from_pretrained(_model_name())
 
 
+@lru_cache(maxsize=MODEL_INFERENCE_CACHE_SIZE)
+def _predict_window(text: str):
+    return _model.predict_entities(text, _PREDICT_LABELS, threshold=max(0.0, _PREDICT_FLOOR))
+
+
 def detect_gliner(text: str, score_threshold: float = 0.0) -> list[Span]:
     if not text:
         return []
@@ -114,9 +123,7 @@ def detect_gliner(text: str, score_threshold: float = 0.0) -> list[Span]:
     best: dict[tuple[int, int, str], float] = {}
     with _infer_lock:
         for offset, sub in _windows(text):
-            for ent in _model.predict_entities(
-                sub, _PREDICT_LABELS, threshold=max(0.0, _PREDICT_FLOOR)
-            ):
+            for ent in _predict_window(sub):
                 key = (offset + int(ent["start"]), offset + int(ent["end"]), ent["label"])
                 score = float(ent["score"])
                 if score > best.get(key, -1.0):

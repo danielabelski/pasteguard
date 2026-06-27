@@ -4,6 +4,8 @@ The role-noun suppressor labels and per-label floors are the precision layer; th
 full model integration is covered by benchmarks/pii-accuracy.
 """
 
+from unittest.mock import Mock
+
 import pytest
 
 from detector.gliner_layer import (
@@ -11,7 +13,9 @@ from detector.gliner_layer import (
     _SUPPRESS_LABELS,
     _TOKEN_RE,
     PER_LABEL_FLOOR,
+    Span,
     _windows,
+    detect_gliner,
 )
 
 
@@ -55,3 +59,34 @@ def test_per_label_floors_present_and_ordered():
     # Person carries a stricter floor than location: higher volume and no
     # structural validator, so a higher floor curbs false positives.
     assert PER_LABEL_FLOOR["location"] <= PER_LABEL_FLOOR["person"]
+
+
+def test_window_inference_cache(monkeypatch):
+    repeated_text = "This is going to repeat, don't waste resources more than once!"
+    cache_missed_text = "This appears for the first time, it will increase the model call count."
+
+    mock_predictions = {
+        repeated_text: [{"start": 0, "end": 1, "label": "person", "score": 1.0}],
+        cache_missed_text: [{"start": 0, "end": 1, "label": "person", "score": 1.0}],
+    }
+
+    mock_gliner = Mock()
+    mock_gliner.predict_entities.side_effect = lambda text, *_, **__: mock_predictions[text]
+    monkeypatch.setattr("detector.gliner_layer._model", mock_gliner)
+
+    expected = [
+        Span(
+            entity_type="PERSON",
+            start=0,
+            end=1,
+            score=1.0,
+        )
+    ]
+
+    assert detect_gliner(cache_missed_text, 0.0) == expected
+
+    for _ in range(5):
+        assert detect_gliner(repeated_text, 0.0) == expected
+
+    # Hits once for the original cache miss, and only once more for the repeated content
+    assert mock_gliner.predict_entities.call_count == 2
