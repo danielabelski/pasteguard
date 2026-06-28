@@ -1,18 +1,10 @@
-import type { MaskingConfig } from "../config";
 import { resolveConflicts } from "../masking/conflict-resolver";
 import { incrementAndGenerate } from "../masking/context";
 import {
   generatePlaceholder as generatePlaceholderFromFormat,
   PII_PLACEHOLDER_FORMAT,
 } from "../masking/placeholders";
-import {
-  flushMaskingBuffer as flushBuffer,
-  type MaskSpansResult,
-  maskSpans,
-  type PlaceholderContext,
-  unmaskStreamChunk as unmaskChunk,
-  unmask as unmaskText,
-} from "../masking/service";
+import { type MaskSpansResult, maskSpans, type PlaceholderContext } from "../masking/service";
 import type { RequestExtractor, TextSpan } from "../masking/types";
 import type { PIIDetectionResult, PIIEntity } from "./detect";
 
@@ -27,10 +19,6 @@ function generatePlaceholder(entityType: string, context: PlaceholderContext): s
   return incrementAndGenerate(entityType, context, (type, count) =>
     generatePlaceholderFromFormat(PII_PLACEHOLDER_FORMAT, type, count),
   );
-}
-
-function getFormatValue(config: MaskingConfig): ((original: string) => string) | undefined {
-  return config.show_markers ? (original: string) => `${config.marker_text}${original}` : undefined;
 }
 
 export function mask(
@@ -54,27 +42,6 @@ export function mask(
     masked: result.maskedSpans[0]?.maskedText ?? text,
     context: result.context,
   };
-}
-
-export function unmask(text: string, context: PlaceholderContext, config: MaskingConfig): string {
-  return unmaskText(text, context, getFormatValue(config));
-}
-
-export function unmaskStreamChunk(
-  buffer: string,
-  newChunk: string,
-  context: PlaceholderContext,
-  config: MaskingConfig,
-): { output: string; remainingBuffer: string } {
-  return unmaskChunk(buffer, newChunk, context, getFormatValue(config));
-}
-
-export function flushMaskingBuffer(
-  buffer: string,
-  context: PlaceholderContext,
-  config: MaskingConfig,
-): string {
-  return flushBuffer(buffer, context, getFormatValue(config));
 }
 
 export interface MaskRequestResult<TRequest> {
@@ -118,13 +85,4 @@ function maskSpansWithEntities(
     resolveConflicts,
     existingContext,
   );
-}
-
-export function unmaskResponse<TRequest, TResponse>(
-  response: TResponse,
-  context: PlaceholderContext,
-  config: MaskingConfig,
-  extractor: RequestExtractor<TRequest, TResponse>,
-): TResponse {
-  return extractor.unmaskResponse(response, context, getFormatValue(config));
 }

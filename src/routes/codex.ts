@@ -3,32 +3,25 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { proxy } from "hono/proxy";
 import { z } from "zod";
-import { getConfig, type MaskingConfig } from "../config";
+import { getConfig } from "../config";
 import type { PlaceholderContext } from "../masking/context";
 import {
   type CodexResponsesRequest,
   type CodexResponsesResponse,
   codexExtractor,
 } from "../masking/extractors/codex";
-import {
-  flushMaskingBuffer,
-  unmaskResponse as unmaskPIIResponse,
-  unmaskStreamChunk,
-} from "../pii/mask";
+import { restoreResponse } from "../masking/restorer";
+import { createCodexUnmaskingStream } from "../providers/codex/stream-transformer";
 import { ProviderError } from "../providers/errors";
-import {
-  flushSecretsMaskingBuffer,
-  unmaskSecretsResponse,
-  unmaskSecretsStreamChunk,
-} from "../secrets/mask";
-import { formatMaskedSpansForLog, logScanRoles } from "../services/log-content";
+import { formatMaskedRequestForLog } from "../services/log-content";
 import { logRequest } from "../services/logger";
-import { detectPII, maskPII, type PIIDetectResult } from "../services/pii";
+import type { PIIDetectResult } from "../services/pii";
 import {
-  processSecretsRequest,
-  type SecretsProcessResult,
-  secretPlaceholders,
-} from "../services/secrets";
+  PrivacyPipelineDetectionError,
+  type PrivacyPipelineResult,
+  processPrivacyPipeline,
+} from "../services/privacy-pipeline";
+import type { SecretsProcessResult } from "../services/secrets";
 import {
   createLogData,
   errorFormats,
@@ -68,23 +61,27 @@ codexRoutes.post(
   }),
   async (c) => {
     const startTime = Date.now();
-    let request = c.req.valid("json") as CodexResponsesRequest;
+    const request = c.req.valid("json") as CodexResponsesRequest;
     const config = getConfig();
 
-    const secretsResult = processSecretsRequest(request, config.secrets_detection, codexExtractor);
+    let privacy: PrivacyPipelineResult<CodexResponsesRequest>;
+    try {
+      privacy = await processPrivacyPipeline(request, config, codexExtractor);
+    } catch (error) {
+      if (error instanceof PrivacyPipelineDetectionError) {
+        console.error("PII detection error:", error.cause ?? error);
+        return respondDetectionError(c, error.request as CodexResponsesRequest, startTime);
+      }
+      throw error;
+    }
+
+    const { secretsResult, piiResult } = privacy;
     if (secretsResult.blocked) {
       return respondBlocked(c, request, secretsResult, startTime);
     }
-    if (secretsResult.masked) {
-      request = secretsResult.request;
-    }
 
-    let piiResult: PIIDetectResult;
-    try {
-      piiResult = await detectPII(request, codexExtractor, secretPlaceholders(secretsResult));
-    } catch (error) {
-      console.error("PII detection error:", error);
-      return respondDetectionError(c, request, startTime);
+    if (!piiResult) {
+      throw new Error("PII detection result missing from privacy pipeline");
     }
 
     const shouldBlockRouteMode =
@@ -96,13 +93,10 @@ codexRoutes.post(
       return respondRouteModeBlocked(c, request, piiResult, secretsResult, startTime);
     }
 
-    const piiMasked =
-      config.mode === "mask" ? maskPII(request, piiResult.detection, codexExtractor) : undefined;
-
     return sendToCodex(c, request, {
-      request: piiMasked?.request ?? request,
+      request: privacy.request,
       piiResult,
-      piiMaskingContext: piiMasked?.maskingContext,
+      piiMaskingContext: privacy.piiMaskingContext,
       secretsResult,
       startTime,
       headers: getForwardHeaders(c),
@@ -173,13 +167,7 @@ function getForwardHeaders(c: Context): Record<string, string> {
 
 function formatCodexForLog(request: CodexResponsesRequest): string | undefined {
   const config = getConfig();
-  const scanRoles = logScanRoles({
-    piiRoles: config.pii_detection.scan_roles,
-    piiActive: config.pii_detection.enabled || config.masking.denylist.length > 0,
-    secretRoles: config.secrets_detection.scan_roles,
-    secretsActive: config.secrets_detection.enabled,
-  });
-  return formatMaskedSpansForLog(codexExtractor.extractTexts(request), scanRoles);
+  return formatMaskedRequestForLog(request, codexExtractor, config);
 }
 
 function respondBlocked(
@@ -378,136 +366,10 @@ function respondJson(
   secretsContext?: PlaceholderContext,
   maskingConfig = getConfig().masking,
 ) {
-  let result = response;
-
-  if (piiContext) {
-    result = unmaskPIIResponse(result, piiContext, maskingConfig, codexExtractor);
-  }
-  if (secretsContext) {
-    result = unmaskSecretsResponse(result, secretsContext, maskingConfig, codexExtractor);
-  }
+  const result = restoreResponse(response, codexExtractor, maskingConfig, {
+    piiContext,
+    secretsContext,
+  });
 
   return c.json(result);
-}
-
-function createCodexUnmaskingStream(
-  stream: ReadableStream<Uint8Array>,
-  piiContext: PlaceholderContext | undefined,
-  maskingConfig: MaskingConfig,
-  secretsContext?: PlaceholderContext,
-): ReadableStream<Uint8Array> {
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  let piiBuffer = "";
-  let secretsBuffer = "";
-  let lineBuffer = "";
-
-  function unmaskPayload(payload: unknown): unknown {
-    let result = payload as CodexResponsesResponse;
-
-    if (piiContext) {
-      const spans = codexExtractor.extractTexts(result);
-      result = codexExtractor.applyMasked(
-        result,
-        spans.map((span) => {
-          const { output, remainingBuffer } = unmaskStreamChunk(
-            piiBuffer,
-            span.text,
-            piiContext,
-            maskingConfig,
-          );
-          piiBuffer = remainingBuffer;
-          return { ...span, maskedText: output };
-        }),
-      );
-    }
-
-    if (secretsContext) {
-      const spans = codexExtractor.extractTexts(result);
-      result = codexExtractor.applyMasked(
-        result,
-        spans.map((span) => {
-          const { output, remainingBuffer } = unmaskSecretsStreamChunk(
-            secretsBuffer,
-            span.text,
-            secretsContext,
-            maskingConfig,
-          );
-          secretsBuffer = remainingBuffer;
-          return { ...span, maskedText: output };
-        }),
-      );
-    }
-
-    return result;
-  }
-
-  function processLine(line: string): string {
-    if (!line.startsWith("data: ")) {
-      return `${line}\n`;
-    }
-
-    const data = line.slice(6);
-    if (data === "[DONE]") {
-      return "data: [DONE]\n";
-    }
-
-    try {
-      return `data: ${JSON.stringify(unmaskPayload(JSON.parse(data)))}\n`;
-    } catch {
-      return `${line}\n`;
-    }
-  }
-
-  return new ReadableStream({
-    async start(controller) {
-      const reader = stream.getReader();
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          lineBuffer += decoder.decode(value, { stream: true });
-          const lines = lineBuffer.split("\n");
-          lineBuffer = lines.pop() ?? "";
-
-          let output = "";
-          for (const line of lines) {
-            output += processLine(line);
-          }
-
-          if (output) {
-            controller.enqueue(encoder.encode(output));
-          }
-        }
-
-        lineBuffer += decoder.decode();
-        let finalOutput = lineBuffer ? processLine(lineBuffer) : "";
-        lineBuffer = "";
-
-        if (piiContext && piiBuffer) {
-          finalOutput += `data: ${JSON.stringify({
-            type: "response.output_text.delta",
-            delta: flushMaskingBuffer(piiBuffer, piiContext, maskingConfig),
-          })}\n\n`;
-        }
-        if (secretsContext && secretsBuffer) {
-          finalOutput += `data: ${JSON.stringify({
-            type: "response.output_text.delta",
-            delta: flushSecretsMaskingBuffer(secretsBuffer, secretsContext, maskingConfig),
-          })}\n\n`;
-        }
-        if (finalOutput) {
-          controller.enqueue(encoder.encode(finalOutput));
-        }
-
-        controller.close();
-      } catch (error) {
-        controller.error(error);
-      } finally {
-        reader.releaseLock();
-      }
-    },
-  });
 }
