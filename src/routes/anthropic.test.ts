@@ -35,6 +35,8 @@ app.route("/anthropic", anthropicRoutes);
 const originalFetch = globalThis.fetch;
 const config = getConfig();
 const originalMode = config.mode;
+const originalAPIKey = config.providers.anthropic.api_key;
+const originalLocal = config.local ? { ...config.local } : undefined;
 const originalPiiScanRoles = [...config.pii_detection.scan_roles];
 const originalSecretsEnabled = config.secrets_detection.enabled;
 const originalSecretsAction = config.secrets_detection.action;
@@ -43,6 +45,9 @@ const originalSecretsScanRoles = [...config.secrets_detection.scan_roles];
 afterEach(() => {
   globalThis.fetch = originalFetch;
   config.mode = originalMode;
+  config.providers.anthropic.api_key = originalAPIKey;
+  if (originalLocal) config.local = { ...originalLocal };
+  else delete config.local;
   config.pii_detection.scan_roles = [...originalPiiScanRoles];
   config.secrets_detection.enabled = originalSecretsEnabled;
   config.secrets_detection.action = originalSecretsAction;
@@ -53,6 +58,141 @@ afterEach(() => {
 });
 
 describe("POST /anthropic/v1/messages", () => {
+  test("forwards client headers except internal and transport headers", async () => {
+    config.mode = "mask";
+    config.providers.anthropic.api_key = "configured-key";
+    const forwardedHeaders = {
+      "Anthropic-Beta": "prompt-caching-2024-07-31",
+      "X-New-Provider-Feature": "future-value",
+      "X-Stainless-Runtime": "bun",
+      Cookie: "provider-session=value",
+    };
+    const rejectedHeaders = {
+      Host: "proxy.example",
+      Connection: "keep-alive, X-Hop-Token",
+      "Keep-Alive": "timeout=5",
+      "Content-Encoding": "gzip",
+      "Content-Length": "999",
+      "Proxy-Authorization": "Bearer proxy-token",
+      "X-Hop-Token": "connection-only",
+      "X-PasteGuard-Source": "client",
+      "X-PasteGuard-Future": "internal",
+      "X-OpenWebUI-User-Email": "identity@example.com",
+      "X-OpenWebUI-Chat-Id": "chat-123",
+    };
+    let upstreamHeaders = new Headers();
+    globalThis.fetch = (async (_target: string | URL | Request, init?: RequestInit) => {
+      upstreamHeaders = new Headers(init?.headers);
+      return Response.json({ content: [], model: "claude-test" });
+    }) as typeof fetch;
+
+    for (const clientVersion of [undefined, "2025-01-01"]) {
+      const response = await app.request("/anthropic/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          ...(clientVersion
+            ? { "Anthropic-Version": clientVersion, "X-Api-Key": "client-key" }
+            : {}),
+          ...forwardedHeaders,
+          ...rejectedHeaders,
+        },
+        body: JSON.stringify({
+          model: "claude-test",
+          max_tokens: 128,
+          messages: [{ role: "user", content: "Reply ok" }],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(upstreamHeaders.get("anthropic-version")).toBe(clientVersion ?? "2023-06-01");
+      expect(upstreamHeaders.get("x-api-key")).toBe(
+        clientVersion ? "client-key" : "configured-key",
+      );
+      expect(upstreamHeaders.get("content-type")).toBe("application/json");
+      for (const [name, value] of Object.entries(forwardedHeaders)) {
+        expect(upstreamHeaders.get(name)).toBe(value);
+      }
+      for (const name of Object.keys(rejectedHeaders)) {
+        expect(upstreamHeaders.get(name)).toBeNull();
+      }
+    }
+  });
+
+  test("isolates local credentials and remasks restored tool-history secrets while keeping PII clear", async () => {
+    config.mode = "route";
+    config.secrets_detection.enabled = true;
+    config.secrets_detection.action = "mask";
+    config.secrets_detection.scan_roles = ["user", "tool", "function", "mcp"];
+    config.local = {
+      type: "ollama",
+      base_url: "http://local.test",
+      model: "local-model",
+      api_key: "local-key",
+    };
+    const email = "jane@example.com";
+    const secret = "sk-proj-abc123def456ghi789jkl012mno345pqr678stu901vwx";
+    mockAnalyzeRequest.mockResolvedValueOnce({
+      hasPII: true,
+      spanEntities: [[{ entity_type: "EMAIL_ADDRESS", start: 0, end: email.length, score: 0.99 }]],
+      allEntities: [{ entity_type: "EMAIL_ADDRESS", start: 0, end: email.length, score: 0.99 }],
+      scanTimeMs: 2,
+    });
+    let upstream: Request | undefined;
+    globalThis.fetch = (async (target: string | URL | Request, init?: RequestInit) => {
+      upstream = target instanceof Request ? target : new Request(target, init);
+      return Response.json({ content: [], model: "local-model" });
+    }) as typeof fetch;
+
+    const response = await app.request("/anthropic/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer cloud-token",
+        "X-Api-Key": "cloud-key",
+        Cookie: "cloud-session=value",
+        "X-Client-Metadata": "cloud-context",
+      },
+      body: JSON.stringify({
+        model: "claude-test",
+        max_tokens: 128,
+        messages: [
+          { role: "user", content: `${email} key ${secret}` },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "tool_123",
+                name: "send_email",
+                input: { email, key: secret },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "tool_123", content: "sent" }],
+          },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-PasteGuard-Provider")).toBe("local");
+    const body = await upstream!.text();
+    expect(body).toContain(email);
+    expect(body).not.toContain(secret);
+    expect(JSON.parse(body).messages[1].content[0].input).toEqual({
+      email,
+      key: "[[API_KEY_SK_1]]",
+    });
+    expect(upstream?.url).toBe("http://local.test/v1/messages");
+    expect(upstream?.headers.get("authorization")).toBe("Bearer local-key");
+    for (const name of ["x-api-key", "cookie", "x-client-metadata"]) {
+      expect(upstream?.headers.get(name)).toBeNull();
+    }
+  });
+
   test("remasks known PII in assistant tool-use history before forwarding", async () => {
     const email = "jane@example.com";
     const userText = `Email ${email}`;
